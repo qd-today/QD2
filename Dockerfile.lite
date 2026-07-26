@@ -1,0 +1,29 @@
+# QD2 Lite - Minimal Docker image
+FROM python:3.12-alpine
+
+# Install system dependencies
+RUN apk add --no-cache gcc musl-dev
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Copy workspace files
+COPY pyproject.toml ./
+COPY qd-core/pyproject.toml ./qd-core/
+COPY qd-server/pyproject.toml ./qd-server/
+
+# Install dependencies
+RUN uv sync --no-dev --all-packages
+
+# Copy source code
+COPY qd-core/ ./qd-core/
+COPY qd-server/ ./qd-server/
+
+# Install packages
+RUN uv sync --no-dev --all-packages
+
+EXPOSE 8080
+
+CMD ["uv", "run", "qd-server"]

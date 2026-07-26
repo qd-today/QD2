@@ -1,0 +1,76 @@
+[project]
+name = "qd"
+version = "25.1.0-dev"
+description = "A web framework for HTTP timed task automation."
+authors = [{ name = "a76yyyy", email = "a76yyyy@gmail.com" }]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">= 3.10, <= 3.12"
+dependencies = [
+    "babel>=2.16.0",
+]
+
+[dependency-groups]
+dev = [
+    "colorama>=0.4.6 ; sys_platform == 'win32'",
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
+    "pytest-mock>=3.14.0",
+    "setuptools>=70.0.0",
+    "wheel>=0.45.0",
+    "coverage>=7.6.0",
+]
+lint = [
+    "mypy>=1.13.0",
+    "ruff>=0.7.3",
+]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "tencent"
+url = "https://mirrors.tencent.com/pypi/simple"
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+
+[tool.uv.workspace]
+members = ["qd-core", "qd-cli", "qd-server"]
+
+[tool.uv.sources]
+qd-core = { workspace = true }
+qd-cli = { workspace = true }
+qd-server = { workspace = true }
+
+[tool.mypy]
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
+python_version = "3.10"
+strict = true
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "UP", "N", "I", "B", "A", "SIM", "TCH"]
+ignore = []
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.extend-per-file-ignores]
+"schemas.py" = ["N805"]
+"__init__.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["*/test"]

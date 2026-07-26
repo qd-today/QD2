@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  qd2:
+    build: .
+    container_name: qd2
+    ports:
+      - "8080:8080"
+    volumes:
+      - qd2-data:/root/.qd2
+    environment:
+      - QD_DEBUG=false
+      - QD_LOG_LEVEL=INFO
+      - QD_DB__DB_TYPE=sqlite3
+      - QD_JWT_SECRET=${QD_JWT_SECRET:-change-me-in-production}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  qd2-data:
