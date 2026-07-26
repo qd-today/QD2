@@ -40,6 +40,11 @@ class Task(BaseModel, table=True):
     # Persistent cookie session (original QD dump format: list of cookie dicts)
     cookie_session: list = Field(default=[], sa_column=Column(JSON))
 
+    # Execution options: retry/delay/proxy
+    # {retry_count: int, retry_interval_seconds: int,
+    #  random_delay_min: int, random_delay_max: int, proxy: str}
+    execution_config: dict = Field(default={}, sa_column=Column(JSON))
+
     # Next run time
     next_run_at: Optional[datetime] = Field(default=None)
 

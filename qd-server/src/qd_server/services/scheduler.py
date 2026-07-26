@@ -131,10 +131,10 @@ class QDScheduler:
             logger.info("Removed task %d from scheduler", task_id)
 
     async def run_task_now(self, task_id: int) -> None:
-        """Immediately execute a task."""
-        await self._execute_task(task_id)
+        """Immediately execute a task (manual trigger skips random delay)."""
+        await self._execute_task(task_id, manual=True)
 
-    async def _execute_task(self, task_id: int) -> None:
+    async def _execute_task(self, task_id: int, manual: bool = False) -> None:
         """Execute a scheduled task.
 
         This is the core execution logic that:
@@ -184,55 +184,75 @@ class QDScheduler:
             # Restore persistent cookie session for this task
             cookie_session = CookieSession().from_json(task.cookie_session or [])
 
-            # Execute
-            fetcher = QDFetcher(cookie_session=cookie_session)
+            # Execution options: retry / random delay / proxy
+            exec_cfg = task.execution_config or {}
+            retry_count = max(0, int(exec_cfg.get("retry_count", 0) or 0))
+            retry_interval = max(0, int(exec_cfg.get("retry_interval_seconds", 30) or 30))
+            delay_min = max(0, int(exec_cfg.get("random_delay_min", 0) or 0))
+            delay_max = max(delay_min, int(exec_cfg.get("random_delay_max", 0) or 0))
+            proxy = (exec_cfg.get("proxy") or "").strip() or None
+
+            # Random pre-execution delay (avoid fixed-time detection)
+            if delay_max > 0 and not manual:
+                import random as _random
+
+                delay = _random.uniform(delay_min, delay_max)
+                logger.info("Task %d random delay %.1fs before run", task_id, delay)
+                await asyncio.sleep(delay)
+
             started_at = datetime.utcnow()
 
-            try:
-                results = await fetcher.execute_template(har_template)
-                finished_at = datetime.utcnow()
-                duration = (finished_at - started_at).total_seconds()
-
-                # Persist updated cookies back onto the task
+            results = []
+            error_msg = None
+            status_str = "failed"
+            fetcher = QDFetcher(cookie_session=cookie_session, proxy=proxy)
+            for attempt in range(retry_count + 1):
+                # Fresh fetcher per attempt, reusing the same cookie session
+                fetcher = QDFetcher(cookie_session=cookie_session, proxy=proxy)
                 try:
-                    task.cookie_session = fetcher.session.to_json()
-                except Exception as ce:
-                    logger.warning("Failed to serialize cookie session for task %d: %s", task_id, ce)
+                    results = await fetcher.execute_template(har_template)
+                    has_error = any(r.get("status") == "error" for r in results)
+                    has_assert_fail = any(r.get("success") is False for r in results)
+                    if not has_error and not has_assert_fail:
+                        status_str = "success"
+                        error_msg = None
+                        break
+                    # collect failure reason
+                    if has_error:
+                        error_msg = next(r.get("error") for r in results if r.get("status") == "error")
+                    else:
+                        error_msg = next(
+                            (r.get("message") for r in results if r.get("success") is False and r.get("message")),
+                            "assert failed",
+                        )
+                except Exception as e:
+                    error_msg = str(e)
 
-                # Check if any request failed (network error or failed assert)
-                has_error = any(r.get("status") == "error" for r in results)
-                has_assert_fail = any(r.get("success") is False for r in results)
-                status_str = "failed" if (has_error or has_assert_fail) else "success"
-                error_msg = None
-                if has_error:
-                    error_msg = next(r.get("error") for r in results if r.get("status") == "error")
-                elif has_assert_fail:
-                    error_msg = next(
-                        (r.get("message") for r in results if r.get("success") is False and r.get("message")),
-                        "assert failed",
+                if attempt < retry_count:
+                    logger.warning(
+                        "Task %d attempt %d/%d failed (%s), retrying in %ds",
+                        task_id, attempt + 1, retry_count + 1, error_msg, retry_interval,
                     )
+                    await asyncio.sleep(retry_interval)
 
-                await self._record_run(
-                    session, task, status_str, error_msg,
-                    started_at, finished_at, duration,
-                )
+            finished_at = datetime.utcnow()
+            duration = (finished_at - started_at).total_seconds()
 
-                # Send notifications
-                await self._send_notifications(
-                    session, task.name, status_str, error_msg, duration
-                )
+            # Persist updated cookies back onto the task
+            try:
+                task.cookie_session = fetcher.session.to_json()
+            except Exception as ce:
+                logger.warning("Failed to serialize cookie session for task %d: %s", task_id, ce)
 
-            except Exception as e:
-                finished_at = datetime.utcnow()
-                duration = (finished_at - started_at).total_seconds()
-                logger.error("Task %d execution failed: %s", task_id, e)
-                await self._record_run(
-                    session, task, "failed", str(e),
-                    started_at, finished_at, duration,
-                )
-                await self._send_notifications(
-                    session, task.name, "failed", str(e), duration
-                )
+            await self._record_run(
+                session, task, status_str, error_msg,
+                started_at, finished_at, duration,
+            )
+
+            # Send notifications
+            await self._send_notifications(
+                session, task.name, status_str, error_msg, duration
+            )
 
     async def _record_run(
         self,

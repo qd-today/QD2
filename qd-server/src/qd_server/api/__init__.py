@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from qd_server.api.auth import router as auth_router
 from qd_server.api.templates import router as templates_router
+from qd_server.api.template_sources import router as template_sources_router
 from qd_server.api.tasks import router as tasks_router
 from qd_server.api.task_groups import router as task_groups_router
 from qd_server.api.plugins import router as plugins_router
@@ -16,6 +17,7 @@ api_router = APIRouter(prefix="/api")
 
 api_router.include_router(auth_router, prefix="/auth", tags=["Auth"])
 api_router.include_router(templates_router, prefix="/templates", tags=["Templates"])
+api_router.include_router(template_sources_router, prefix="/template-sources", tags=["TemplateSources"])
 api_router.include_router(task_groups_router, prefix="/task-groups", tags=["TaskGroups"])
 api_router.include_router(tasks_router, prefix="/tasks", tags=["Tasks"])
 api_router.include_router(plugins_router, prefix="/plugins", tags=["Plugins"])

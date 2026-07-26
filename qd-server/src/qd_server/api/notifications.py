@@ -166,3 +166,61 @@ async def delete_notification(
 
     await session.delete(notification)
     await session.commit()
+
+
+# --- Channel metadata + test send ---
+
+CHANNEL_SCHEMAS = {
+    "webhook": {"label": "Webhook", "fields": ["url", "method", "headers"]},
+    "email": {
+        "label": "邮件 (SMTP)",
+        "fields": ["smtp_host", "smtp_port", "smtp_user", "smtp_password", "from_addr", "to_addr", "use_tls"],
+    },
+    "bark": {"label": "Bark (iOS)", "fields": ["server", "device_key", "group", "sound"]},
+    "serverchan": {"label": "Server酱 Turbo", "fields": ["sendkey"]},
+    "telegram": {"label": "Telegram Bot", "fields": ["bot_token", "chat_id", "api_host"]},
+    "pushdeer": {"label": "PushDeer", "fields": ["pushkey", "server"]},
+    "gotify": {"label": "Gotify", "fields": ["server", "token", "priority"]},
+    "dingtalk": {"label": "钉钉机器人", "fields": ["access_token", "secret", "url"]},
+    "wecom": {"label": "企业微信机器人", "fields": ["key", "url"]},
+}
+
+
+@router.get("/channels")
+async def list_channels(current_user: User = Depends(get_current_user)):
+    """List supported notification channel types and their config fields."""
+    return CHANNEL_SCHEMAS
+
+
+@router.post("/{notification_id}/test")
+async def test_notification(
+    notification_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Send a test message through the configured channel."""
+    from qd_server.services.notification import send_notification
+
+    result = await session.execute(
+        select(Notification).where(
+            Notification.id == notification_id,
+            Notification.user_id == current_user.id,
+        )
+    )
+    notification = result.scalar_one_or_none()
+
+    if notification is None:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    config = dict(notification.config or {})
+    config["type"] = notification.notification_type
+
+    ok = await send_notification(
+        notification_config=config,
+        task_name="测试通知",
+        status="success",
+        error_message=None,
+        duration_seconds=0.5,
+    )
+
+    return {"sent": ok, "channel": notification.notification_type}

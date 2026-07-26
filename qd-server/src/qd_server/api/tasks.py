@@ -23,6 +23,7 @@ class TaskCreate(BaseModel):
     description: Optional[str] = ""
     schedule_config: dict = {}
     variables: dict = {}
+    execution_config: dict = {}
     group_id: Optional[int] = None
 
 
@@ -31,6 +32,7 @@ class TaskUpdate(BaseModel):
     description: Optional[str] = None
     schedule_config: Optional[dict] = None
     variables: Optional[dict] = None
+    execution_config: Optional[dict] = None
     status: Optional[str] = None  # pause, resume
     group_id: Optional[int] = None
 
@@ -43,6 +45,7 @@ class TaskResponse(BaseModel):
     schedule_config: dict
     status: str
     variables: dict
+    execution_config: dict = {}
     group_id: Optional[int]
     next_run_at: Optional[datetime]
     run_count: int
@@ -107,6 +110,7 @@ async def list_tasks(
                 schedule_config=t.schedule_config,
                 status=t.status,
                 variables=t.variables,
+                execution_config=t.execution_config or {},
                 group_id=t.group_id,
                 next_run_at=t.next_run_at,
                 run_count=t.run_count,
@@ -136,6 +140,7 @@ async def create_task(
         description=request.description,
         schedule_config=request.schedule_config,
         variables=request.variables,
+        execution_config=request.execution_config,
         created_at=now,
         updated_at=now,
     )
@@ -155,6 +160,7 @@ async def create_task(
         schedule_config=task.schedule_config,
         status=task.status,
         variables=task.variables,
+        execution_config=task.execution_config or {},
         group_id=task.group_id,
         next_run_at=task.next_run_at,
         run_count=task.run_count,
@@ -188,6 +194,7 @@ async def get_task(
         schedule_config=task.schedule_config,
         status=task.status,
         variables=task.variables,
+        execution_config=task.execution_config or {},
         group_id=task.group_id,
         next_run_at=task.next_run_at,
         run_count=task.run_count,
@@ -231,6 +238,7 @@ async def update_task(
         schedule_config=task.schedule_config,
         status=task.status,
         variables=task.variables,
+        execution_config=task.execution_config or {},
         group_id=task.group_id,
         next_run_at=task.next_run_at,
         run_count=task.run_count,
