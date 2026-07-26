@@ -132,6 +132,25 @@ async def create_task(
     session: AsyncSession = Depends(get_session),
 ):
     """Create a new task."""
+    # Task quota check (0 = unlimited)
+    from qd_server.api.admin import get_system_settings
+
+    sys_settings = await get_system_settings(session)
+    max_tasks = int(sys_settings.get("max_tasks_per_user", 0) or 0)
+    if max_tasks > 0:
+        from sqlmodel import func
+
+        count = (
+            await session.execute(
+                select(func.count()).select_from(Task).where(Task.user_id == current_user.id)
+            )
+        ).scalar_one()
+        if count >= max_tasks:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Task quota exceeded (max {max_tasks} per user)",
+            )
+
     now = datetime.utcnow()
     task = Task(
         user_id=current_user.id,

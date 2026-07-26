@@ -97,7 +97,22 @@ async def register(request: RegisterRequest, session: AsyncSession = Depends(get
     """Register a new user.
 
     The first registered user automatically becomes admin.
+    Registration can be disabled by an admin via system settings.
     """
+    # Check registration switch (first user can always register)
+    count_result = await session.execute(select(User))
+    user_count = len(count_result.scalars().all())
+
+    if user_count > 0:
+        from qd_server.api.admin import get_system_settings
+
+        settings_data = await get_system_settings(session)
+        if not settings_data.get("registration_enabled", True):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Registration is disabled by administrator",
+            )
+
     # Check if username exists
     result = await session.execute(select(User).where(User.username == request.username))
     if result.scalar_one_or_none():
@@ -106,9 +121,6 @@ async def register(request: RegisterRequest, session: AsyncSession = Depends(get
             detail="Username already exists",
         )
 
-    # Check if this is the first user — first user becomes admin
-    count_result = await session.execute(select(User))
-    user_count = len(count_result.scalars().all())
     role = "admin" if user_count == 0 else "user"
 
     user = User(

@@ -12,6 +12,7 @@ from qd_server.api.notifications import router as notifications_router
 from qd_server.api.notepad import router as notepad_router
 from qd_server.api.test_request import router as test_router
 from qd_server.api.migrate import router as migrate_router
+from qd_server.api.admin import router as admin_router
 
 api_router = APIRouter(prefix="/api")
 
@@ -25,3 +26,4 @@ api_router.include_router(notifications_router, prefix="/notifications", tags=["
 api_router.include_router(notepad_router, prefix="/notepad", tags=["Notepad"])
 api_router.include_router(test_router, prefix="/test", tags=["Test"])
 api_router.include_router(migrate_router, prefix="/migrate", tags=["Migrate"])
+api_router.include_router(admin_router, prefix="/admin", tags=["Admin"])
