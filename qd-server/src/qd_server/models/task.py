@@ -37,6 +37,9 @@ class Task(BaseModel, table=True):
     # Runtime variables override
     variables: dict = Field(default={}, sa_column=Column(JSON))
 
+    # Persistent cookie session (original QD dump format: list of cookie dicts)
+    cookie_session: list = Field(default=[], sa_column=Column(JSON))
+
     # Next run time
     next_run_at: Optional[datetime] = Field(default=None)
 

@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import httpx
 
+from qd_core.client.cookie_session import CookieSession
 from qd_core.client.render import render_string
 from qd_core.client.rule import run_rule
 from qd_core.config import QDCoreSettings
@@ -24,13 +25,18 @@ class QDFetcher:
     - Jinja2 variable rendering (QD v1 filter compatible)
     - Success/failed asserts per request (QD v1 rule engine)
     - Response data extraction (regex rules, JSON path, headers)
-    - Cookie persistence across requests
+    - Persistent cookie session across requests and runs
     """
 
-    def __init__(self, settings: Optional[QDCoreSettings] = None, proxy: Optional[str] = None):
+    def __init__(
+        self,
+        settings: Optional[QDCoreSettings] = None,
+        proxy: Optional[str] = None,
+        cookie_session: Optional[CookieSession] = None,
+    ):
         self.settings = settings or QDCoreSettings()
         self.variables: dict[str, Any] = {}
-        self._cookies: dict[str, str] = {}
+        self.session = cookie_session or CookieSession()
         self.proxy = proxy
 
     async def execute_template(self, template: HARTemplate) -> list[dict[str, Any]]:
@@ -51,7 +57,7 @@ class QDFetcher:
         client_kwargs: dict[str, Any] = dict(
             timeout=self.settings.request_timeout,
             follow_redirects=True,
-            cookies=self._cookies,
+            cookies=self.session.to_httpx_cookies(),
         )
         if self.proxy:
             client_kwargs["proxy"] = self.proxy
@@ -66,8 +72,8 @@ class QDFetcher:
                     result = await self._execute_request(client, request, template.extractors)
                     results.append(result)
 
-                    # Update cookies from response
-                    self._cookies.update(dict(client.cookies))
+                    # Persist response cookies into the session
+                    self.session.update_from_httpx(client.cookies)
 
                     if not result.get("success", True):
                         logger.warning("Request %d failed assert: %s", i + 1, result.get("message"))
@@ -98,7 +104,7 @@ class QDFetcher:
         Renders url/headers/body with Jinja2, executes, then runs the QD v1
         rule engine (asserts + extract_variables) followed by legacy extractors.
         """
-        cookies_view = dict(self._cookies)
+        cookies_view = self.session
 
         # Render request pieces with Jinja2 (QD v1 compatible)
         url = render_string(request.url, self.variables, cookies_view)

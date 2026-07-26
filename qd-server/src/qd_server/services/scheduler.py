@@ -148,6 +148,7 @@ class QDScheduler:
         from qd_server.models.template import Template
         from qd_core.client.har import HARParser
         from qd_core.client.fetcher import QDFetcher
+        from qd_core.client.cookie_session import CookieSession
         from sqlmodel import select
 
         logger.info("Executing task %d", task_id)
@@ -180,8 +181,11 @@ class QDScheduler:
                 await self._record_run(session, task, "failed", str(e))
                 return
 
+            # Restore persistent cookie session for this task
+            cookie_session = CookieSession().from_json(task.cookie_session or [])
+
             # Execute
-            fetcher = QDFetcher()
+            fetcher = QDFetcher(cookie_session=cookie_session)
             started_at = datetime.utcnow()
 
             try:
@@ -189,12 +193,24 @@ class QDScheduler:
                 finished_at = datetime.utcnow()
                 duration = (finished_at - started_at).total_seconds()
 
-                # Check if any request failed
+                # Persist updated cookies back onto the task
+                try:
+                    task.cookie_session = fetcher.session.to_json()
+                except Exception as ce:
+                    logger.warning("Failed to serialize cookie session for task %d: %s", task_id, ce)
+
+                # Check if any request failed (network error or failed assert)
                 has_error = any(r.get("status") == "error" for r in results)
-                status_str = "failed" if has_error else "success"
+                has_assert_fail = any(r.get("success") is False for r in results)
+                status_str = "failed" if (has_error or has_assert_fail) else "success"
                 error_msg = None
                 if has_error:
                     error_msg = next(r.get("error") for r in results if r.get("status") == "error")
+                elif has_assert_fail:
+                    error_msg = next(
+                        (r.get("message") for r in results if r.get("success") is False and r.get("message")),
+                        "assert failed",
+                    )
 
                 await self._record_run(
                     session, task, status_str, error_msg,

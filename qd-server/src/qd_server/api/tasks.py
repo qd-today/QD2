@@ -107,6 +107,7 @@ async def list_tasks(
                 schedule_config=t.schedule_config,
                 status=t.status,
                 variables=t.variables,
+                group_id=t.group_id,
                 next_run_at=t.next_run_at,
                 run_count=t.run_count,
                 last_run_at=t.last_run_at,
@@ -354,3 +355,83 @@ async def list_task_runs(
         )
         for r in runs
     ]
+
+
+# --- Cookie session management ---
+
+class CookieItem(BaseModel):
+    name: str
+    value: str
+    domain: Optional[str] = ""
+    path: Optional[str] = "/"
+    expires: Optional[int] = None
+    secure: Optional[bool] = False
+
+
+class CookieSessionResponse(BaseModel):
+    task_id: int
+    cookies: list[dict]
+    count: int
+
+
+async def _get_owned_task(task_id: int, current_user: User, session: AsyncSession) -> Task:
+    result = await session.execute(
+        select(Task).where(Task.id == task_id, Task.user_id == current_user.id)
+    )
+    task = result.scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@router.get("/{task_id}/cookies", response_model=CookieSessionResponse)
+async def get_task_cookies(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """View the task's persistent cookie session."""
+    task = await _get_owned_task(task_id, current_user, session)
+    cookies = task.cookie_session or []
+    return CookieSessionResponse(task_id=task_id, cookies=cookies, count=len(cookies))
+
+
+@router.put("/{task_id}/cookies", response_model=CookieSessionResponse)
+async def set_task_cookies(
+    task_id: int,
+    cookies: list[CookieItem],
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Replace the task's cookie session with the provided cookies."""
+    from qd_core.client.cookie_session import CookieSession as CoreCookieSession
+
+    task = await _get_owned_task(task_id, current_user, session)
+
+    # Normalize through CookieSession to validate + canonical format
+    cs = CoreCookieSession().from_json([c.model_dump() for c in cookies])
+    task.cookie_session = cs.to_json()
+    task.updated_at = datetime.utcnow()
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+
+    return CookieSessionResponse(
+        task_id=task_id, cookies=task.cookie_session, count=len(task.cookie_session)
+    )
+
+
+@router.delete("/{task_id}/cookies", response_model=CookieSessionResponse)
+async def clear_task_cookies(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Clear the task's persistent cookie session."""
+    task = await _get_owned_task(task_id, current_user, session)
+    task.cookie_session = []
+    task.updated_at = datetime.utcnow()
+    session.add(task)
+    await session.commit()
+
+    return CookieSessionResponse(task_id=task_id, cookies=[], count=0)

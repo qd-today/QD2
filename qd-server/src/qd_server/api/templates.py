@@ -20,7 +20,7 @@ router = APIRouter()
 class TemplateCreate(BaseModel):
     name: str
     description: Optional[str] = ""
-    template_data: dict = {}
+    template_data: dict | list = {}
     variables: dict = {}
     tags: list[str] = []
     is_public: bool = False
@@ -29,7 +29,7 @@ class TemplateCreate(BaseModel):
 class TemplateUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    template_data: Optional[dict] = None
+    template_data: Optional[dict | list] = None
     variables: Optional[dict] = None
     tags: Optional[list[str]] = None
     is_public: Optional[bool] = None
@@ -40,7 +40,7 @@ class TemplateResponse(BaseModel):
     id: int
     name: str
     description: Optional[str]
-    template_data: dict
+    template_data: dict | list
     variables: dict
     tags: list
     is_public: bool
@@ -260,6 +260,13 @@ async def export_template(
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
 
+    # template_data can be a dict (QD2 native) or list (QD v1 tpl format)
+    tpl_data = template.template_data
+    if isinstance(tpl_data, list):
+        tpl_requests = [e.get("request", {}) for e in tpl_data if isinstance(e, dict)]
+    else:
+        tpl_requests = tpl_data.get("requests", [])
+
     if format == "har":
         # Convert to HAR 1.2 format
         har_data = {
@@ -269,7 +276,7 @@ async def export_template(
                 "entries": [],
             }
         }
-        requests = template.template_data.get("requests", [])
+        requests = tpl_requests
         for req in requests:
             har_entry = {
                 "request": {
@@ -310,7 +317,7 @@ async def export_template(
         "version": "1.0",
         "tags": template.tags,
         "variables": template.variables,
-        "requests": template.template_data.get("requests", []),
+        "requests": tpl_requests,
     }
     return JSONResponse(
         content=export_data,

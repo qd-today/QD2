@@ -25,7 +25,7 @@ class Template(BaseModel, table=True):
     version: str = Field(default="1.0", max_length=20)
 
     # Template data (stored as JSON)
-    template_data: dict = Field(default={}, sa_column=Column(JSON))
+    template_data: dict | list = Field(default={}, sa_column=Column(JSON))
 
     # Variables (stored as JSON)
     variables: dict = Field(default={}, sa_column=Column(JSON))
