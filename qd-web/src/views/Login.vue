@@ -1,135 +1,85 @@
-<template>
-  <div class="login-container">
-    <el-card class="login-card">
-      <template #header>
-        <h2>{{ isRegister ? t('auth.registerTitle') : t('auth.loginTitle') }}</h2>
-      </template>
-
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-width="auto"
-        @submit.prevent="handleSubmit"
-      >
-        <el-form-item :label="t('auth.username')" prop="username">
-          <el-input v-model="form.username" :placeholder="t('auth.username')" />
-        </el-form-item>
-
-        <el-form-item :label="t('auth.password')" prop="password">
-          <el-input
-            v-model="form.password"
-            type="password"
-            :placeholder="t('auth.password')"
-            show-password
-          />
-        </el-form-item>
-
-        <el-form-item v-if="isRegister" label="确认密码" prop="confirmPassword">
-          <el-input
-            v-model="form.confirmPassword"
-            type="password"
-            placeholder="请再次输入密码"
-            show-password
-          />
-        </el-form-item>
-
-        <el-form-item>
-          <el-button type="primary" native-type="submit" :loading="loading" style="width: 100%">
-            {{ isRegister ? t('common.register') : t('common.login') }}
-          </el-button>
-        </el-form-item>
-
-        <el-form-item>
-          <el-button link type="primary" @click="isRegister = !isRegister" style="width: 100%">
-            {{ isRegister ? '已有账号？去登录' : '没有账号？去注册' }}
-          </el-button>
-        </el-form-item>
-      </el-form>
-    </el-card>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
+import { useMessage } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/api'
 
-const { t } = useI18n()
 const router = useRouter()
 const route = useRoute()
+const message = useMessage()
 const authStore = useAuthStore()
 
-const formRef = ref()
+const mode = ref<'login' | 'register'>('login')
 const loading = ref(false)
-const isRegister = ref(false)
+const form = ref({ username: '', password: '', email: '' })
 
-const form = reactive({
-  username: '',
-  password: '',
-  confirmPassword: '',
-})
-
-const validateConfirmPassword = (_rule: any, value: string, callback: any) => {
-  if (value !== form.password) {
-    callback(new Error('两次输入的密码不一致'))
-  } else {
-    callback()
+async function submit() {
+  if (!form.value.username || !form.value.password) {
+    message.warning('请输入用户名和密码')
+    return
   }
-}
-
-const rules = {
-  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-  confirmPassword: [
-    { required: true, message: '请再次输入密码', trigger: 'blur' },
-    { validator: validateConfirmPassword, trigger: 'blur' },
-  ],
-}
-
-async function handleSubmit() {
-  const valid = await formRef.value?.validate().catch(() => false)
-  if (!valid) return
-
   loading.value = true
   try {
-    if (isRegister.value) {
-      // Register
+    if (mode.value === 'register') {
       await api.post('/api/auth/register', {
-        username: form.username,
-        password: form.password,
+        username: form.value.username,
+        password: form.value.password,
+        email: form.value.email || undefined,
       })
-      ElMessage.success('注册成功，请登录')
-      isRegister.value = false
-    } else {
-      // Login
-      await authStore.login(form.username, form.password)
-      ElMessage.success(t('auth.loginSuccess'))
-      const redirect = (route.query.redirect as string) || '/'
-      router.push(redirect)
+      message.success('注册成功，正在登录…')
     }
-  } catch (err: any) {
-    const msg = err.response?.data?.detail || (isRegister.value ? '注册失败' : t('auth.loginFailed'))
-    ElMessage.error(msg)
+    await authStore.login(form.value.username, form.value.password)
+    const redirect = (route.query.redirect as string) || '/'
+    router.push(redirect)
+  } catch (e: any) {
+    message.error(e.response?.data?.detail || (mode.value === 'register' ? '注册失败' : '登录失败'))
   } finally {
     loading.value = false
   }
 }
 </script>
 
-<style scoped>
-.login-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 100vh;
-  background-color: #f5f5f5;
-}
-
-.login-card {
-  width: 400px;
-}
-</style>
+<template>
+  <div
+    class="h-full flex items-center justify-center bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-400"
+  >
+    <div class="w-full max-w-sm mx-4">
+      <n-card :bordered="false" class="shadow-2xl rounded-2xl">
+        <div class="text-center mb-6">
+          <h1 class="text-3xl font-bold text-indigo-600">QD2</h1>
+          <p class="text-gray-400 text-sm mt-1">HTTP 定时任务自动化框架</p>
+        </div>
+        <n-form @keyup.enter="submit">
+          <n-form-item label="用户名" :show-feedback="false" class="mb-3">
+            <n-input v-model:value="form.username" placeholder="用户名" />
+          </n-form-item>
+          <n-form-item label="密码" :show-feedback="false" class="mb-3">
+            <n-input
+              v-model:value="form.password"
+              type="password"
+              show-password-on="click"
+              placeholder="密码"
+            />
+          </n-form-item>
+          <n-form-item
+            v-if="mode === 'register'"
+            label="邮箱 (可选)"
+            :show-feedback="false"
+            class="mb-3"
+          >
+            <n-input v-model:value="form.email" placeholder="email@example.com" />
+          </n-form-item>
+        </n-form>
+        <n-button type="primary" block size="large" :loading="loading" class="mt-4" @click="submit">
+          {{ mode === 'login' ? '登 录' : '注 册' }}
+        </n-button>
+        <div class="text-center mt-4">
+          <n-button text type="primary" @click="mode = mode === 'login' ? 'register' : 'login'">
+            {{ mode === 'login' ? '没有账号？注册' : '已有账号？登录' }}
+          </n-button>
+        </div>
+      </n-card>
+    </div>
+  </div>
+</template>

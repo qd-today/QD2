@@ -31,9 +31,19 @@ const router = createRouter({
           component: () => import('@/views/TemplateDetail.vue'),
         },
         {
+          path: 'template-store',
+          name: 'TemplateStore',
+          component: () => import('@/views/TemplateStore.vue'),
+        },
+        {
           path: 'tasks',
           name: 'Tasks',
           component: () => import('@/views/Tasks.vue'),
+        },
+        {
+          path: 'admin',
+          name: 'Admin',
+          component: () => import('@/views/Admin.vue'),
         },
         {
           path: 'plugins',

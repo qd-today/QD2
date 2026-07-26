@@ -70,10 +70,32 @@ def create_app() -> FastAPI:
     # Include API routes
     app.include_router(api_router)
 
+    # WebSocket routes (full path declared in router)
+    from qd_server.api.ws import router as ws_router
+
+    app.include_router(ws_router)
+
     # Health check
     @app.get("/health")
     async def health_check():
         return {"status": "ok", "version": "25.1.0-dev"}
+
+    # Serve frontend static files (qd-web/dist) if present
+    from pathlib import Path
+
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    dist_dir = Path(__file__).resolve().parents[3] / "qd-web" / "dist"
+    if dist_dir.exists():
+        app.mount("/assets", StaticFiles(directory=dist_dir / "assets"), name="assets")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def spa_fallback(full_path: str):
+            file_path = dist_dir / full_path
+            if full_path and file_path.is_file():
+                return FileResponse(file_path)
+            return FileResponse(dist_dir / "index.html")
 
     return app
 

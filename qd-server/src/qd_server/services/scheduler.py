@@ -154,6 +154,8 @@ class QDScheduler:
         logger.info("Executing task %d", task_id)
         settings = get_settings()
 
+        from qd_server.services.log_stream import log_stream
+
         async with settings.db.scoped_session() as session:
             # Load task
             result = await session.execute(select(Task).where(Task.id == task_id))
@@ -201,6 +203,10 @@ class QDScheduler:
                 await asyncio.sleep(delay)
 
             started_at = datetime.utcnow()
+            log_stream.publish(
+                task.user_id, "task_start", task_id=task_id, task_name=task.name,
+                attempts=retry_count + 1,
+            )
 
             results = []
             error_msg = None
@@ -209,8 +215,20 @@ class QDScheduler:
             for attempt in range(retry_count + 1):
                 # Fresh fetcher per attempt, reusing the same cookie session
                 fetcher = QDFetcher(cookie_session=cookie_session, proxy=proxy)
+                if attempt > 0:
+                    log_stream.publish(
+                        task.user_id, "task_retry", task_id=task_id, task_name=task.name,
+                        attempt=attempt + 1,
+                    )
                 try:
                     results = await fetcher.execute_template(har_template)
+                    for idx, r in enumerate(results):
+                        log_stream.publish(
+                            task.user_id, "request_done", task_id=task_id, task_name=task.name,
+                            request_index=idx, success=bool(r.get("success", r.get("status") != "error")),
+                            status_code=r.get("status_code"), url=r.get("url", ""),
+                            message=(r.get("message") or r.get("error") or "")[:200],
+                        )
                     has_error = any(r.get("status") == "error" for r in results)
                     has_assert_fail = any(r.get("success") is False for r in results)
                     if not has_error and not has_assert_fail:
@@ -247,6 +265,12 @@ class QDScheduler:
             await self._record_run(
                 session, task, status_str, error_msg,
                 started_at, finished_at, duration,
+            )
+
+            log_stream.publish(
+                task.user_id, "task_finish", task_id=task_id, task_name=task.name,
+                status=status_str, duration=round(duration, 2),
+                error=(error_msg or "")[:300],
             )
 
             # Send notifications

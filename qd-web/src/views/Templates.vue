@@ -1,73 +1,12 @@
-<template>
-  <div class="templates">
-    <div class="page-header">
-      <h2>{{ t('template.title') }}</h2>
-      <el-button type="primary" @click="openCreate">
-        {{ t('template.create') }}
-      </el-button>
-    </div>
-
-    <el-table :data="templateStore.templates" v-loading="templateStore.loading" stripe>
-      <el-table-column prop="name" :label="t('template.name')" min-width="150" />
-      <el-table-column prop="description" :label="t('template.description')" min-width="200" show-overflow-tooltip />
-      <el-table-column prop="tags" :label="t('template.tags')" width="200">
-        <template #default="{ row }">
-          <el-tag v-for="tag in row.tags" :key="tag" size="small" style="margin-right: 4px">
-            {{ tag }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="enabled" :label="t('template.enabled')" width="80">
-        <template #default="{ row }">
-          <el-tag :type="row.enabled ? 'success' : 'info'" size="small">
-            {{ row.enabled ? '✓' : '✗' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="run_count" :label="t('template.runCount')" width="80" />
-      <el-table-column :label="t('template.actions')" width="280" fixed="right">
-        <template #default="{ row }">
-          <el-button size="small" @click="openEdit(row)">编辑</el-button>
-          <el-dropdown trigger="click" style="margin: 0 4px">
-            <el-button size="small">导出 ▾</el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item @click="exportTemplate(row.id, 'qd2')">QD2 格式</el-dropdown-item>
-                <el-dropdown-item @click="exportTemplate(row.id, 'har')">HAR 格式</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-          <el-button size="small" type="danger" @click="deleteTemplate(row.id)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-
-    <!-- Create/Edit Dialog -->
-    <el-dialog
-      v-model="showEditor"
-      :title="editingId ? '编辑模板' : t('template.create')"
-      width="900px"
-      top="5vh"
-      destroy-on-close
-    >
-      <TemplateEditor ref="editorRef" :initial-data="editorData" />
-      <template #footer>
-        <el-button @click="showEditor = false">{{ t('common.cancel') }}</el-button>
-        <el-button type="primary" :loading="saving" @click="save">{{ t('common.save') }}</el-button>
-      </template>
-    </el-dialog>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { onMounted, ref } from 'vue'
+import { useMessage, useDialog } from 'naive-ui'
 import { useTemplateStore } from '@/stores/template'
 import TemplateEditor from '@/components/TemplateEditor.vue'
 import api from '@/api'
 
-const { t } = useI18n()
+const message = useMessage()
+const dialog = useDialog()
 const templateStore = useTemplateStore()
 
 const showEditor = ref(false)
@@ -104,21 +43,19 @@ async function exportTemplate(id: number, format: string) {
     a.download = `template.${format === 'har' ? 'har' : 'json'}`
     a.click()
     window.URL.revokeObjectURL(url)
-    ElMessage.success('导出成功')
-  } catch (err: any) {
-    ElMessage.error('导出失败')
+    message.success('导出成功')
+  } catch {
+    message.error('导出失败')
   }
 }
 
 async function save() {
   const data = editorRef.value?.getData()
   if (!data) return
-
   if (!data.name) {
-    ElMessage.warning('请输入模板名称')
+    message.warning('请输入模板名称')
     return
   }
-
   saving.value = true
   try {
     if (editingId.value) {
@@ -127,26 +64,91 @@ async function save() {
       await templateStore.createTemplate(data)
     }
     showEditor.value = false
-    ElMessage.success(t('common.success'))
+    message.success('保存成功')
   } catch (err: any) {
-    ElMessage.error(err.response?.data?.detail || '保存失败')
+    message.error(err.response?.data?.detail || '保存失败')
   } finally {
     saving.value = false
   }
 }
 
-async function deleteTemplate(id: number) {
-  await ElMessageBox.confirm('确定删除该模板？')
-  await templateStore.deleteTemplate(id)
-  ElMessage.success(t('common.success'))
+function deleteTemplate(id: number) {
+  dialog.warning({
+    title: '删除模板',
+    content: '确定删除该模板？',
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      await templateStore.deleteTemplate(id)
+      message.success('已删除')
+    },
+  })
 }
 </script>
 
-<style scoped>
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-</style>
+<template>
+  <div>
+    <div class="flex justify-between items-center mb-4">
+      <h2 class="text-lg font-semibold m-0">模板管理</h2>
+      <n-button type="primary" @click="openCreate">新建模板</n-button>
+    </div>
+
+    <n-spin :show="templateStore.loading">
+      <n-empty
+        v-if="templateStore.templates.length === 0 && !templateStore.loading"
+        description="暂无模板 — 可从「模板库」安装公共模板，或新建/导入 HAR"
+        class="mt-16"
+      />
+      <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <n-card
+          v-for="row in templateStore.templates"
+          :key="row.id"
+          size="small"
+          class="rounded-lg"
+          hoverable
+        >
+          <div class="flex justify-between items-start gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="font-medium truncate" :title="row.name">{{ row.name }}</div>
+              <div class="text-xs text-gray-400 mt-1 line-clamp-2">
+                {{ row.description || '无描述' }}
+              </div>
+              <div class="mt-2 flex flex-wrap gap-1">
+                <n-tag v-for="tag in row.tags" :key="tag" size="tiny" round>{{ tag }}</n-tag>
+                <n-tag size="tiny" :type="row.enabled ? 'success' : 'default'" round>
+                  {{ row.enabled ? '启用' : '禁用' }}
+                </n-tag>
+              </div>
+            </div>
+          </div>
+          <template #action>
+            <div class="flex gap-1 justify-end">
+              <n-button size="tiny" quaternary @click="openEdit(row)">编辑</n-button>
+              <n-button size="tiny" quaternary @click="exportTemplate(row.id, 'qd2')">导出</n-button>
+              <n-button size="tiny" quaternary @click="exportTemplate(row.id, 'har')">HAR</n-button>
+              <n-button size="tiny" quaternary type="error" @click="deleteTemplate(row.id)">
+                删除
+              </n-button>
+            </div>
+          </template>
+        </n-card>
+      </div>
+    </n-spin>
+
+    <n-modal
+      v-model:show="showEditor"
+      preset="card"
+      :title="editingId ? '编辑模板' : '新建模板'"
+      class="max-w-4xl"
+      :style="{ width: '92vw' }"
+    >
+      <TemplateEditor ref="editorRef" :initial-data="editorData" />
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <n-button @click="showEditor = false">取消</n-button>
+          <n-button type="primary" :loading="saving" @click="save">保存</n-button>
+        </div>
+      </template>
+    </n-modal>
+  </div>
+</template>
