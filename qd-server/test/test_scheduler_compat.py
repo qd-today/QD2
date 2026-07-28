@@ -4,16 +4,15 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
-from sqlmodel.ext.asyncio.session import AsyncSession
-
 import qd_server.models  # noqa: F401 - register all tables
 from qd_server.models.notification import Notification
-from qd_server.models.task import Task
+from qd_server.models.task import Task, TaskRun
 from qd_server.models.template import Template
 from qd_server.models.user import User
 from qd_server.services.scheduler import QDScheduler
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlmodel import SQLModel, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 
 class SchedulerCapture:
@@ -143,5 +142,79 @@ async def test_scheduled_execution_skips_paused_task_and_inactive_user(monkeypat
 
     assert await service._execute_task(paused.id) is None
     assert await service._execute_task(inactive_task.id) is None
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execution_publishes_and_persists_extracted_task_log(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with factory() as session:
+        user = User(username="task-log-user", hashed_password="x")
+        session.add(user)
+        await session.flush()
+        template = Template(
+            user_id=user.id,
+            name="task-log-template",
+            template_data={"name": "task-log-template", "requests": [{"url": "https://example.com/"}]},
+        )
+        session.add(template)
+        await session.flush()
+        task = Task(user_id=user.id, template_id=template.id, name="task-log-task")
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+    class FakeFetcher:
+        def __init__(self, cookie_session, proxy=None):
+            self.session = cookie_session
+
+        async def execute_template(self, _template):
+            return [
+                {
+                    "status": "success",
+                    "success": True,
+                    "status_code": 200,
+                    "url": "https://example.com/",
+                    "extracted_variables": {"__log__": "first line\nsecond line", "token": "secret"},
+                }
+            ]
+
+    settings = SimpleNamespace(db=SimpleNamespace(scoped_session=factory))
+    monkeypatch.setattr("qd_server.config.get_settings", lambda: settings)
+    monkeypatch.setattr("qd_core.client.fetcher.QDFetcher", FakeFetcher)
+    events = []
+    monkeypatch.setattr(
+        "qd_server.services.log_stream.log_stream.publish",
+        lambda user_id, event_type, **data: events.append((user_id, event_type, data)),
+    )
+    service = QDScheduler()
+
+    async def skip_notifications(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_send_notifications", skip_notifications)
+    run = await service._execute_task(task.id, manual=True)
+
+    assert run.response_summary == "first line\nsecond line"
+    assert run.extracted_variables == {"__log__": "first line\nsecond line"}
+    task_log_events = [data for _, event_type, data in events if event_type == "task_log"]
+    assert task_log_events == [
+        {
+            "task_id": task.id,
+            "task_name": "task-log-task",
+            "request_index": 0,
+            "content": "first line\nsecond line",
+        }
+    ]
+
+    async with factory() as session:
+        stored = (await session.execute(select(TaskRun))).scalar_one()
+        assert stored.response_summary == "first line\nsecond line"
+        assert stored.extracted_variables == {"__log__": "first line\nsecond line"}
 
     await engine.dispose()

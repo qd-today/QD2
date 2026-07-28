@@ -18,14 +18,6 @@ function formatTime(iso?: string) {
   return iso ? new Date(iso + 'Z').toLocaleString() : '-'
 }
 
-function formatJson(data: any) {
-  try {
-    return JSON.stringify(JSON.parse(data), null, 2)
-  } catch {
-    return data
-  }
-}
-
 async function fetchRuns() {
   if (!props.taskId) return
   loading.value = true
@@ -155,10 +147,10 @@ watch(
       </div>
 
       <div v-if="selectedRun?.response_summary" class="mt-4">
-        <div class="text-sm font-medium mb-1">响应摘要</div>
+        <div class="text-sm font-medium mb-1">任务日志 (__log__)</div>
         <pre
-          class="bg-gray-50 dark:bg-gray-800 p-3 rounded text-xs whitespace-pre-wrap break-all max-h-64 overflow-auto"
-          >{{ formatJson(selectedRun.response_summary) }}</pre
+          class="bg-gray-50 text-gray-800 dark:bg-gray-800 dark:text-gray-100 p-3 rounded text-xs whitespace-pre-wrap break-all max-h-64 overflow-auto"
+          >{{ selectedRun.response_summary }}</pre
         >
       </div>
     </n-modal>

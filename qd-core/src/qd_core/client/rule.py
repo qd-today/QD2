@@ -6,7 +6,7 @@ httpx responses.
 
 import base64
 import re
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -36,13 +36,16 @@ def _get_data(response: httpx.Response, _from: str) -> str:
 
 def run_rule(
     response: httpx.Response,
-    rule: Optional[RequestRule],
+    rule: RequestRule | None,
     variables: dict[str, Any],
     cookies: Any = None,
+    extracted_variables: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Evaluate success/failed asserts and extract variables from a response.
 
     Mutates ``variables`` in place with extracted values (QD v1 behaviour).
+    When supplied, ``extracted_variables`` receives only values extracted by
+    this rule evaluation.
 
     Returns:
         (success, message) tuple.
@@ -109,15 +112,24 @@ def run_rule(
         data = _get_data(response, r.from_)
         if find_all:
             try:
-                variables[r.name] = re.compile(pattern, flags).findall(data)
+                value = re.compile(pattern, flags).findall(data)
             except Exception as e:
-                variables[r.name] = str(e)
+                value = str(e)
+            variables[r.name] = value
+            if extracted_variables is not None:
+                extracted_variables[r.name] = value
         else:
             try:
                 m = re.compile(pattern, flags).search(data)
                 if m:
-                    variables[r.name] = m.groups()[0] if m.groups() else m.group(0)
+                    value = m.groups()[0] if m.groups() else m.group(0)
+                    variables[r.name] = value
+                    if extracted_variables is not None:
+                        extracted_variables[r.name] = value
             except Exception as e:
-                variables[r.name] = str(e)
+                value = str(e)
+                variables[r.name] = value
+                if extracted_variables is not None:
+                    extracted_variables[r.name] = value
 
     return success, msg

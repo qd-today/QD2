@@ -1,9 +1,10 @@
 """Tests for the QD v1 compatible rule engine (asserts + variable extraction)."""
 
 import httpx
-
+import pytest
+from qd_core.client.fetcher import QDFetcher
 from qd_core.client.rule import run_rule
-from qd_core.schemas.har import AssertRule, ExtractRule, RequestRule
+from qd_core.schemas.har import AssertRule, ExtractRule, HARRequest, RequestRule
 
 
 def make_response(
@@ -95,7 +96,9 @@ class TestExtractVariables:
         assert variables["word"] == "hello"
 
     def test_extract_from_header(self):
-        rule = RequestRule(extract_variables=[ExtractRule(name="session", re="sid=([a-z0-9]+)", from_="header-Set-Cookie")])
+        rule = RequestRule(
+            extract_variables=[ExtractRule(name="session", re="sid=([a-z0-9]+)", from_="header-Set-Cookie")]
+        )
         variables = {}
         run_rule(make_response("x", headers={"Set-Cookie": "sid=deadbeef; Path=/"}), rule, variables)
         assert variables["session"] == "deadbeef"
@@ -104,3 +107,23 @@ class TestExtractVariables:
         rule = RequestRule(success_asserts=[AssertRule(re="{{expected}}", from_="content")])
         ok, _ = run_rule(make_response("hello world"), rule, {"expected": "world"})
         assert ok
+
+    @pytest.mark.asyncio
+    async def test_fetcher_returns_rule_extracted_log(self):
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="result:first line\nsecond line")
+
+        request = HARRequest(
+            url="https://example.com/",
+            rule=RequestRule(
+                extract_variables=[
+                    ExtractRule(name="__log__", re=r"result:([\s\S]*)", from_="content"),
+                ]
+            ),
+        )
+        fetcher = QDFetcher()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await fetcher._execute_request(client, request, {})
+
+        assert result["extracted_variables"]["__log__"] == "first line\nsecond line"
+        assert fetcher.variables["__log__"] == "first line\nsecond line"

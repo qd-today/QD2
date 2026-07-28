@@ -18,6 +18,7 @@ interface LogEvent {
   status_code?: number
   url?: string
   message?: string
+  content?: string
   replay?: boolean
 }
 
@@ -84,6 +85,7 @@ onBeforeUnmount(disconnect)
 function eventColor(ev: LogEvent): string {
   if (ev.type === 'task_finish') return ev.status === 'success' ? 'text-green-500' : 'text-red-500'
   if (ev.type === 'task_retry') return 'text-yellow-500'
+  if (ev.type === 'task_log') return 'text-emerald-500 dark:text-emerald-400'
   if (ev.type === 'request_done') return ev.success ? 'text-gray-400' : 'text-red-400'
   return 'text-blue-400'
 }
@@ -96,6 +98,8 @@ function eventText(ev: LogEvent): string {
       return `↻ 任务「${ev.task_name}」第 ${ev.attempt} 次尝试`
     case 'request_done':
       return `  · 请求 #${(ev.request_index ?? 0) + 1} ${ev.success ? '✓' : '✗'} [${ev.status_code ?? '-'}] ${ev.url || ''} ${ev.message ? '— ' + ev.message : ''}`
+    case 'task_log':
+      return `  · 任务日志 (__log__)\n${ev.content || ''}`
     case 'task_finish':
       return `■ 任务「${ev.task_name}」${ev.status === 'success' ? '成功' : '失败'} (${ev.duration}s)${ev.error ? ' — ' + ev.error : ''}`
     default:

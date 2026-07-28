@@ -4,16 +4,24 @@ Manages scheduled task execution using APScheduler with async support.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 logger = logging.getLogger("qd2.scheduler")
+
+
+def _format_task_log(value: Any) -> str:
+    """Convert a QD ``__log__`` value into readable persisted text."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
 class QDScheduler:
@@ -50,12 +58,13 @@ class QDScheduler:
 
     async def load_tasks(self) -> None:
         """Load all active tasks from database and register them."""
+        from sqlalchemy import not_
+        from sqlmodel import select
+
         from qd_server.config import get_settings
         from qd_server.models.task import Task
         from qd_server.models.template import Template
         from qd_server.models.user import User
-        from sqlmodel import select
-        from sqlalchemy import not_
 
         settings = get_settings()
         async with settings.db.scoped_session() as session:
@@ -65,8 +74,8 @@ class QDScheduler:
                 .join(Template, Template.id == Task.template_id)
                 .where(
                     not_(Task.status.in_(["disabled", "paused"])),
-                    User.is_active == True,
-                    Template.enabled == True,
+                    User.is_active,
+                    Template.enabled,
                     Template.user_id == Task.user_id,
                 )
             )
@@ -156,11 +165,11 @@ class QDScheduler:
             self.scheduler.remove_job(job_id)
             logger.info("Removed task %d from scheduler", task_id)
 
-    async def run_task_now(self, task_id: int) -> Optional[Any]:
+    async def run_task_now(self, task_id: int) -> Any | None:
         """Immediately execute a task (manual trigger skips random delay)."""
         return await self._execute_task(task_id, manual=True)
 
-    async def _execute_task(self, task_id: int, manual: bool = False) -> Optional[Any]:
+    async def _execute_task(self, task_id: int, manual: bool = False) -> Any | None:
         """Execute a scheduled task.
 
         This is the core execution logic that:
@@ -169,14 +178,15 @@ class QDScheduler:
         3. Records the run result
         4. Sends notifications if configured
         """
+        from qd_core.client.cookie_session import CookieSession
+        from qd_core.client.fetcher import QDFetcher
+        from qd_core.client.har import HARParser
+        from sqlmodel import select
+
         from qd_server.config import get_settings
         from qd_server.models.task import Task
         from qd_server.models.template import Template
         from qd_server.models.user import User
-        from qd_core.client.har import HARParser
-        from qd_core.client.fetcher import QDFetcher
-        from qd_core.client.cookie_session import CookieSession
-        from sqlmodel import select
 
         logger.info("Executing task %d", task_id)
         settings = get_settings()
@@ -188,7 +198,7 @@ class QDScheduler:
             result = await session.execute(
                 select(Task)
                 .join(User, User.id == Task.user_id)
-                .where(Task.id == task_id, User.is_active == True)
+                .where(Task.id == task_id, User.is_active)
             )
             task = result.scalar_one_or_none()
 
@@ -221,7 +231,7 @@ class QDScheduler:
             result = await session.execute(
                 select(Task)
                 .join(User, User.id == Task.user_id)
-                .where(Task.id == task_id, User.is_active == True)
+                .where(Task.id == task_id, User.is_active)
             )
             task = result.scalar_one_or_none()
             if task is None or (not manual and task.status in ("disabled", "paused")):
@@ -233,7 +243,7 @@ class QDScheduler:
                 select(Template).where(
                     Template.id == task.template_id,
                     Template.user_id == task.user_id,
-                    Template.enabled == True,
+                    Template.enabled,
                 )
             )
             template = result.scalar_one_or_none()
@@ -271,6 +281,7 @@ class QDScheduler:
             results = []
             error_msg = None
             status_str = "failed"
+            task_log = None
             fetcher = QDFetcher(cookie_session=cookie_session, proxy=proxy)
             for attempt in range(retry_count + 1):
                 # Fresh fetcher per attempt, reusing the same cookie session
@@ -289,6 +300,13 @@ class QDScheduler:
                             status_code=r.get("status_code"), url=r.get("url", ""),
                             message=(r.get("message") or r.get("error") or "")[:200],
                         )
+                        extracted = r.get("extracted_variables") or {}
+                        if "__log__" in extracted:
+                            task_log = _format_task_log(extracted["__log__"])
+                            log_stream.publish(
+                                task.user_id, "task_log", task_id=task_id, task_name=task.name,
+                                request_index=idx, content=task_log,
+                            )
                     has_error = any(r.get("status") == "error" for r in results)
                     has_assert_fail = any(r.get("success") is False for r in results)
                     if not has_error and not has_assert_fail:
@@ -325,6 +343,8 @@ class QDScheduler:
             run = await self._record_run(
                 session, task, status_str, error_msg,
                 started_at, finished_at, duration,
+                response_summary=task_log,
+                extracted_variables={"__log__": task_log} if task_log is not None else {},
             )
 
             log_stream.publish(
@@ -344,10 +364,12 @@ class QDScheduler:
         session,
         task,
         status_str: str,
-        error_message: Optional[str] = None,
-        started_at: Optional[datetime] = None,
-        finished_at: Optional[datetime] = None,
-        duration: Optional[float] = None,
+        error_message: str | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        duration: float | None = None,
+        response_summary: str | None = None,
+        extracted_variables: dict[str, Any] | None = None,
     ) -> Any:
         """Record a task execution run."""
         from qd_server.models.task import TaskRun
@@ -360,6 +382,8 @@ class QDScheduler:
             finished_at=finished_at,
             duration_seconds=duration,
             error_message=error_message,
+            response_summary=response_summary,
+            extracted_variables=extracted_variables or {},
         )
         session.add(run)
 
@@ -379,19 +403,20 @@ class QDScheduler:
         user_id: int,
         task_name: str,
         status: str,
-        error_message: Optional[str] = None,
-        duration: Optional[float] = None,
+        error_message: str | None = None,
+        duration: float | None = None,
     ) -> None:
         """Send notifications for task completion."""
-        from qd_server.models.notification import Notification
-        from qd_server.services.notification import send_notification
         from sqlalchemy import or_
         from sqlmodel import select
+
+        from qd_server.models.notification import Notification
+        from qd_server.services.notification import send_notification
 
         result = await session.execute(
             select(Notification).where(
                 Notification.user_id == user_id,
-                Notification.enabled == True,
+                Notification.enabled,
                 or_(Notification.task_id.is_(None), Notification.task_id == task_id),
             )
         )

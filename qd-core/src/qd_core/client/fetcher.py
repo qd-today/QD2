@@ -4,7 +4,7 @@ Async HTTP client that executes HAR template requests with QD v1 compatible
 Jinja2 rendering, success/failed asserts, and variable extraction.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -30,9 +30,9 @@ class QDFetcher:
 
     def __init__(
         self,
-        settings: Optional[QDCoreSettings] = None,
-        proxy: Optional[str] = None,
-        cookie_session: Optional[CookieSession] = None,
+        settings: QDCoreSettings | None = None,
+        proxy: str | None = None,
+        cookie_session: CookieSession | None = None,
     ):
         self.settings = settings or QDCoreSettings()
         self.variables: dict[str, Any] = {}
@@ -141,11 +141,19 @@ class QDFetcher:
         )
 
         # QD v1 rule engine: success/failed asserts + extract_variables
-        success, message = run_rule(response, request.rule, self.variables, cookies_view)
+        rule_extracted: dict[str, Any] = {}
+        success, message = run_rule(
+            response,
+            request.rule,
+            self.variables,
+            cookies_view,
+            extracted_variables=rule_extracted,
+        )
 
         # Legacy extractors (QD2 early format)
-        extracted = self._extract_variables(response, request.extractors, global_extractors)
-        self.variables.update(extracted)
+        legacy_extracted = self._extract_variables(response, request.extractors, global_extractors)
+        self.variables.update(legacy_extracted)
+        extracted = {**rule_extracted, **legacy_extracted}
 
         return {
             "status": "success" if success else "failed",
@@ -208,9 +216,6 @@ class QDFetcher:
 
         current = data
         for key, index in segments:
-            if index:
-                current = current[int(index)]
-            else:
-                current = current[key]
+            current = current[int(index)] if index else current[key]
 
         return current
