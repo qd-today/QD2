@@ -62,14 +62,18 @@ async function fetchTemplates() {
   try {
     const res = await api.get('/api/templates?page_size=100')
     templates.value = res.data.items
-  } catch {}
+  } catch {
+    message.error('模板列表加载失败')
+  }
 }
 
 async function fetchGroups() {
   try {
     const res = await api.get('/api/task-groups')
     groups.value = res.data
-  } catch {}
+  } catch {
+    message.error('任务分组加载失败')
+  }
 }
 
 function getTemplateName(id: number) {

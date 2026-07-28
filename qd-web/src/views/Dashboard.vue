@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useMessage } from 'naive-ui'
 import api from '@/api'
 
 const router = useRouter()
+const message = useMessage()
 
 const stats = ref({ templates: 0, tasks: 0, success: 0, failed: 0 })
 const recentRuns = ref<any[]>([])
@@ -23,14 +25,20 @@ onMounted(async () => {
 
     // recent runs across first tasks
     const runsAll: any[] = []
+    let historyLoadFailed = false
     for (const t of tasks.slice(0, 5)) {
       try {
         const r = await api.get(`/api/tasks/${t.id}/runs`, { params: { page_size: 5 } })
         for (const run of r.data) runsAll.push({ ...run, task_name: t.name })
-      } catch {}
+      } catch {
+        historyLoadFailed = true
+      }
     }
+    if (historyLoadFailed) message.warning('部分执行记录加载失败')
     runsAll.sort((a, b) => (b.started_at > a.started_at ? 1 : -1))
     recentRuns.value = runsAll.slice(0, 10)
+  } catch {
+    message.error('仪表盘加载失败')
   } finally {
     loading.value = false
   }

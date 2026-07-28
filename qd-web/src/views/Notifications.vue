@@ -63,7 +63,9 @@ async function fetchChannels() {
   try {
     const res = await api.get('/api/notifications/channels')
     channels.value = res.data
-  } catch {}
+  } catch {
+    message.error('通知渠道类型加载失败')
+  }
 }
 
 async function fetchNotifications() {
@@ -71,6 +73,8 @@ async function fetchNotifications() {
   try {
     const res = await api.get('/api/notifications')
     notifications.value = res.data
+  } catch {
+    message.error('通知渠道加载失败')
   } finally {
     loading.value = false
   }
