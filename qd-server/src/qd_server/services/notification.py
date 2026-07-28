@@ -10,6 +10,7 @@ Supports all channels from original QD plus webhook/email:
 - gotify
 - dingtalk (钉钉群机器人)
 - wecom (企业微信群机器人)
+- wecom_app (企业微信应用 Pusher)
 """
 
 import logging
@@ -58,6 +59,7 @@ async def send_notification(
         "gotify": send_gotify,
         "dingtalk": send_dingtalk,
         "wecom": send_wecom,
+        "wecom_app": send_wecom_app,
     }
 
     handler = handlers.get(notification_type)
@@ -387,3 +389,74 @@ async def send_wecom(
 
     title, body = _build_title_body(task_name, status, error_message, duration_seconds)
     return await _post(url, json={"msgtype": "text", "text": {"content": f"{title}\n{body}"}})
+
+
+async def send_wecom_app(
+    config: dict,
+    task_name: str,
+    status: str,
+    error_message: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+) -> bool:
+    """企业微信自建应用 Pusher.
+
+    Config: corp_id/corpid, corp_secret/corpsecret, agent_id/agentid,
+    and touser. ``touser`` accepts the enterprise WeChat ``@all`` value.
+    """
+    corp_id = config.get("corp_id") or config.get("corpid")
+    corp_secret = config.get("corp_secret") or config.get("corpsecret")
+    agent_id = config.get("agent_id") or config.get("agentid")
+    touser = config.get("touser")
+    if not corp_id or not corp_secret or agent_id in (None, "") or not touser:
+        logger.error("WeCom app corp_id/corp_secret/agent_id/touser not configured")
+        return False
+
+    try:
+        agent_id = int(agent_id)
+    except (TypeError, ValueError):
+        logger.error("WeCom app agent_id must be an integer")
+        return False
+
+    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+            token_resp = await client.get(
+                "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
+                params={"corpid": corp_id, "corpsecret": corp_secret},
+            )
+            token_resp.raise_for_status()
+            token_data = token_resp.json()
+            access_token = token_data.get("access_token")
+            if token_data.get("errcode", 0) != 0 or not access_token:
+                logger.error(
+                    "WeCom app token request failed: errcode=%s errmsg=%s",
+                    token_data.get("errcode"),
+                    token_data.get("errmsg", ""),
+                )
+                return False
+
+            send_resp = await client.post(
+                "https://qyapi.weixin.qq.com/cgi-bin/message/send",
+                params={"access_token": access_token},
+                json={
+                    "touser": str(touser),
+                    "msgtype": "text",
+                    "agentid": agent_id,
+                    "text": {"content": f"{title}\n{body}"},
+                },
+            )
+            send_resp.raise_for_status()
+            send_data = send_resp.json()
+            if send_data.get("errcode", 0) != 0:
+                logger.error(
+                    "WeCom app message failed: errcode=%s errmsg=%s",
+                    send_data.get("errcode"),
+                    send_data.get("errmsg", ""),
+                )
+                return False
+            return True
+    except (httpx.HTTPError, ValueError) as exc:
+        # HTTP exception strings may include the query string containing
+        # corpsecret or access_token, so only log the exception type.
+        logger.error("WeCom app request failed: %s", type(exc).__name__)
+        return False

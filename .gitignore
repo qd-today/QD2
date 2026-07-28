@@ -27,8 +27,10 @@ htmlcov/
 .pytest_cache/
 .mypy_cache/
 
-# uv
-uv.lock
+# Package manager caches
+.uv-cache/
+.npm-cache/
+.runtime-audit/
 
 # Environment
 .env

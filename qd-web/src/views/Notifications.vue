@@ -49,6 +49,10 @@ const FIELD_LABELS: Record<string, string> = {
   access_token: 'Access Token',
   secret: '加签密钥 (可选)',
   key: 'Key',
+  corp_id: '企业 ID (CorpID)',
+  corp_secret: '应用 Secret',
+  agent_id: '应用 AgentId',
+  touser: '接收成员账号',
 }
 
 onMounted(async () => {
@@ -166,7 +170,7 @@ function deleteNotification(id: number) {
     <n-spin :show="loading">
       <n-empty
         v-if="notifications.length === 0 && !loading"
-        description="暂无通知渠道 — 支持 Bark / Server酱 / Telegram / 钉钉 / 企业微信 / PushDeer / Gotify / Webhook / 邮件"
+        description="暂无通知渠道 — 支持 Bark / Server酱 / Telegram / 钉钉 / 企业微信机器人与 Pusher / PushDeer / Gotify / Webhook / 邮件"
         class="mt-16"
       />
       <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -238,14 +242,14 @@ function deleteNotification(id: number) {
         >
           <n-switch v-if="field === 'use_tls'" v-model:value="form.config[field]" />
           <n-input-number
-            v-else-if="field === 'smtp_port' || field === 'priority'"
+            v-else-if="field === 'smtp_port' || field === 'priority' || field === 'agent_id'"
             v-model:value="form.config[field]"
             class="w-full"
           />
           <n-input
             v-else
             v-model:value="form.config[field]"
-            :type="field.includes('password') || field.includes('token') || field.includes('key') ? 'password' : 'text'"
+            :type="field.includes('password') || field.includes('token') || field.includes('key') || field.includes('secret') ? 'password' : 'text'"
             show-password-on="click"
             :placeholder="FIELD_LABELS[field] || field"
           />

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useMessage, useDialog } from 'naive-ui'
 import { useTaskStore } from '@/stores/task'
 import api from '@/api'
@@ -75,7 +75,7 @@ async function fetchGroups() {
 function getTemplateName(id: number) {
   return templates.value.find((t) => t.id === id)?.name
 }
-function getGroupName(id: number | null) {
+function getGroupName(id?: number | null) {
   return groups.value.find((g) => g.id === id)?.name
 }
 
@@ -101,6 +101,7 @@ function scheduleText(row: any): string {
 function extractVars(templateId: number) {
   const tmpl = templates.value.find((t) => t.id === templateId)
   const vars = new Set<string>()
+  for (const key of Object.keys(tmpl?.variables || {})) vars.add(key)
   const scan = (s?: string) => {
     for (const m of (s || '').matchAll(/\{\{\s*(\w+)/g)) {
       const name = m[1]
@@ -232,8 +233,10 @@ async function save() {
 async function runTask(id: number) {
   runningId.value = id
   try {
+    window.dispatchEvent(new CustomEvent('qd:open-logs'))
+    await nextTick()
     await taskStore.runTask(id)
-    message.success('任务已执行，可在右上角「实时日志」查看详情')
+    message.success('任务执行完成')
     await taskStore.fetchTasks()
   } catch {
     message.error('执行失败')
@@ -392,15 +395,17 @@ function deleteGroup(id: number) {
         </n-form-item>
 
         <n-divider title-placement="left" class="!my-2 !text-xs">模板变量</n-divider>
-        <template v-if="templateVariables.length > 0">
-          <n-form-item v-for="v in templateVariables" :key="v.key" :label="v.key">
+        <div v-if="templateVariables.length > 0" class="space-y-3 mb-3">
+          <div v-for="v in templateVariables" :key="v.key" class="grid grid-cols-1 md:grid-cols-[minmax(12rem,2fr)_minmax(18rem,3fr)] gap-1 md:gap-3 items-center">
+            <label class="text-sm break-all" :title="v.key">{{ v.key }}</label>
             <n-input
               v-model:value="form.variables[v.key]"
               :placeholder="v.value || '请输入值'"
               size="small"
+              class="w-full"
             />
-          </n-form-item>
-        </template>
+          </div>
+        </div>
         <div v-else class="text-xs text-gray-400 mb-2 pl-2">该模板无需变量</div>
 
         <n-divider title-placement="left" class="!my-2 !text-xs">调度设置</n-divider>

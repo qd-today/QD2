@@ -256,7 +256,7 @@ qd plugin install <plugin-name>
 | `QD_DEBUG` | 调试模式 | `false` |
 | `QD_LOG_LEVEL` | 日志级别 | `INFO` |
 | `QD_DB__DB_TYPE` | 数据库类型 | `sqlite3` |
-| `QD_JWT_SECRET` | JWT 密钥 | `change-me-in-production` |
+| `QD_JWT_SECRET` | JWT 密钥；未配置时自动生成到 `~/.qd2/jwt-secret` | 自动生成 |
 | `QD_PORT` | 后端端口 | `8924` |
 
 ---

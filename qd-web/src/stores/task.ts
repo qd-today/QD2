@@ -10,7 +10,8 @@ interface Task {
   schedule_config: Record<string, unknown>
   status: string
   variables: Record<string, unknown>
-  group_id?: number
+  execution_config: Record<string, unknown>
+  group_id?: number | null
   next_run_at?: string
   run_count: number
   last_run_at?: string

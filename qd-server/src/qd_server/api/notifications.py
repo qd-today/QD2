@@ -3,13 +3,14 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from qd_server.middleware.auth import get_current_user, get_session
 from qd_server.models.notification import Notification
+from qd_server.models.task import Task
 from qd_server.models.user import User
 
 router = APIRouter()
@@ -26,6 +27,7 @@ class NotificationCreate(BaseModel):
 
 class NotificationUpdate(BaseModel):
     name: Optional[str] = None
+    notification_type: Optional[str] = None
     config: Optional[dict] = None
     enabled: Optional[bool] = None
     on_success: Optional[bool] = None
@@ -80,6 +82,16 @@ async def create_notification(
     session: AsyncSession = Depends(get_session),
 ):
     """Create a new notification."""
+    if request.task_id is not None:
+        task_result = await session.execute(
+            select(Task.id).where(
+                Task.id == request.task_id,
+                Task.user_id == current_user.id,
+            )
+        )
+        if task_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+
     notification = Notification(
         user_id=current_user.id,
         name=request.name,
@@ -183,6 +195,10 @@ CHANNEL_SCHEMAS = {
     "gotify": {"label": "Gotify", "fields": ["server", "token", "priority"]},
     "dingtalk": {"label": "钉钉机器人", "fields": ["access_token", "secret", "url"]},
     "wecom": {"label": "企业微信机器人", "fields": ["key", "url"]},
+    "wecom_app": {
+        "label": "企业微信 Pusher",
+        "fields": ["corp_id", "corp_secret", "agent_id", "touser"],
+    },
 }
 
 

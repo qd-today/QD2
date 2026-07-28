@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -35,12 +35,12 @@ class AdminUserResponse(BaseModel):
 class AdminUserUpdate(BaseModel):
     role: Optional[str] = None  # admin / user
     is_active: Optional[bool] = None
-    email: Optional[str] = None
-    display_name: Optional[str] = None
+    email: Optional[str] = Field(default=None, max_length=100)
+    display_name: Optional[str] = Field(default=None, max_length=100)
 
 
 class ResetPasswordRequest(BaseModel):
-    new_password: str
+    new_password: str = Field(min_length=6, max_length=128)
 
 
 class SettingsResponse(BaseModel):
@@ -50,7 +50,7 @@ class SettingsResponse(BaseModel):
 
 class SettingsUpdate(BaseModel):
     registration_enabled: Optional[bool] = None
-    max_tasks_per_user: Optional[int] = None
+    max_tasks_per_user: Optional[int] = Field(default=None, ge=0, le=100000)
 
 
 SETTINGS_KEY = "system"
@@ -126,6 +126,7 @@ async def update_user(
 ):
     """Update a user's role/status/profile."""
     user = await _get_user(user_id, session)
+    was_active = user.is_active
 
     if request.role is not None:
         if request.role not in ("admin", "user"):
@@ -156,6 +157,22 @@ async def update_user(
     session.add(user)
     await session.commit()
     await session.refresh(user)
+
+    if was_active != user.is_active:
+        from qd_server.services.scheduler import scheduler
+
+        query = select(Task).where(Task.user_id == user.id)
+        if user.is_active:
+            query = query.join(Template, Template.id == Task.template_id).where(
+                Template.user_id == user.id,
+                Template.enabled == True,
+            )
+        tasks = (await session.execute(query)).scalars().all()
+        for task in tasks:
+            if user.is_active and task.status not in ("paused", "disabled"):
+                scheduler.add_task(task)
+            else:
+                scheduler.remove_task(task.id)
 
     return AdminUserResponse(
         id=user.id,
@@ -209,13 +226,21 @@ async def delete_user(
     from qd_server.models.task_group import TaskGroup
     from qd_server.models.template_source import TemplateSource
 
-    for model in (TaskRun, Task, Template, TemplateSource, TaskGroup, Notification, Notepad):
+    task_ids = list(
+        (await session.execute(select(Task.id).where(Task.user_id == user_id))).scalars().all()
+    )
+    for model in (TaskRun, Notification, Task, Template, TemplateSource, TaskGroup, Notepad):
         rows = await session.execute(select(model).where(model.user_id == user_id))
         for row in rows.scalars().all():
             await session.delete(row)
 
     await session.delete(user)
     await session.commit()
+
+    from qd_server.services.scheduler import scheduler
+
+    for task_id in task_ids:
+        scheduler.remove_task(task_id)
 
 
 # --- System settings ---

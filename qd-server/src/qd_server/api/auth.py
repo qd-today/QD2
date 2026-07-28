@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -25,15 +25,23 @@ router = APIRouter()
 # --- Request/Response schemas ---
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    email: Optional[str] = None
-    display_name: Optional[str] = None
+    username: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=6, max_length=128)
+    email: Optional[str] = Field(default=None, max_length=100)
+    display_name: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("username cannot be blank")
+        return value
 
 
 class TokenResponse(BaseModel):
@@ -44,7 +52,7 @@ class TokenResponse(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(min_length=1, max_length=4096)
 
 
 class UserResponse(BaseModel):

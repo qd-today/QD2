@@ -13,7 +13,12 @@ DEFAULT_CONFIG_DIR = Path.home() / ".qd2"
 class QDBaseSettings(BaseSettings):
     """Base settings class for QD modules."""
 
-    model_config = {"env_prefix": "QD_", "env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_prefix": "QD_",
+        "env_nested_delimiter": "__",
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+    }
 
 
 class QDCoreSettings(QDBaseSettings):

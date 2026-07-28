@@ -5,11 +5,14 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlmodel import col, select
+from sqlalchemy import delete as sql_delete
+from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from qd_server.middleware.auth import get_current_user, get_session
 from qd_server.models.task import Task, TaskRun
+from qd_server.models.task_group import TaskGroup
+from qd_server.models.template import Template
 from qd_server.models.user import User
 
 router = APIRouter()
@@ -64,6 +67,13 @@ class TaskRunResponse(BaseModel):
     duration_seconds: Optional[float]
     error_message: Optional[str]
     response_summary: Optional[str]
+
+
+class TaskRunStatsResponse(BaseModel):
+    total: int
+    success: int
+    failed: int
+    other: int
 
 
 class TaskListResponse(BaseModel):
@@ -132,6 +142,9 @@ async def create_task(
     session: AsyncSession = Depends(get_session),
 ):
     """Create a new task."""
+    _validate_task_config(request.schedule_config, request.execution_config)
+    await _validate_task_relations(request.template_id, request.group_id, current_user, session)
+
     # Task quota check (0 = unlimited)
     from qd_server.api.admin import get_system_settings
 
@@ -160,6 +173,7 @@ async def create_task(
         schedule_config=request.schedule_config,
         variables=request.variables,
         execution_config=request.execution_config,
+        group_id=request.group_id,
         created_at=now,
         updated_at=now,
     )
@@ -241,6 +255,14 @@ async def update_task(
         raise HTTPException(status_code=404, detail="Task not found")
 
     update_data = request.model_dump(exclude_unset=True)
+    _validate_task_config(
+        update_data.get("schedule_config", task.schedule_config),
+        update_data.get("execution_config", task.execution_config),
+    )
+    if "group_id" in update_data:
+        await _validate_group(update_data["group_id"], current_user, session)
+    if "status" in update_data and update_data["status"] not in ("pending", "paused", "disabled"):
+        raise HTTPException(status_code=422, detail="Invalid task status")
     for key, value in update_data.items():
         setattr(task, key, value)
 
@@ -248,6 +270,13 @@ async def update_task(
     session.add(task)
     await session.commit()
     await session.refresh(task)
+
+    from qd_server.services.scheduler import scheduler
+
+    if task.status in ("paused", "disabled"):
+        scheduler.remove_task(task.id)
+    else:
+        scheduler.add_task(task)
 
     return TaskResponse(
         id=task.id,
@@ -283,6 +312,10 @@ async def delete_task(
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    from qd_server.models.notification import Notification
+
+    await session.execute(sql_delete(TaskRun).where(TaskRun.task_id == task_id))
+    await session.execute(sql_delete(Notification).where(Notification.task_id == task_id))
     await session.delete(task)
     await session.commit()
 
@@ -306,29 +339,15 @@ async def run_task(
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Execute via scheduler (creates its own session)
+    # Execute via scheduler (creates its own session) and return this exact run.
     from qd_server.services.scheduler import scheduler
-    await scheduler.run_task_now(task_id)
-
-    # Get the latest run record (scheduler creates it)
-    from sqlalchemy import desc
-    runs_result = await session.execute(
-        select(TaskRun)
-        .where(TaskRun.task_id == task_id)
-        .order_by(desc(TaskRun.started_at))
-        .limit(1)
-    )
-    run = runs_result.scalar_one_or_none()
+    await session.commit()
+    run = await scheduler.run_task_now(task_id)
 
     if run is None:
-        # Fallback: should not happen, but handle gracefully
-        run = TaskRun(
-            task_id=task.id,
-            user_id=current_user.id,
-            status="unknown",
-            started_at=datetime.utcnow(),
-            finished_at=datetime.utcnow(),
-            duration_seconds=0.0,
+        raise HTTPException(
+            status_code=409,
+            detail="Task is not runnable (user, task, or template is disabled)",
         )
 
     return TaskRunResponse(
@@ -361,7 +380,7 @@ async def list_task_runs(
 
     query = (
         select(TaskRun)
-        .where(TaskRun.task_id == task_id)
+        .where(TaskRun.task_id == task_id, TaskRun.user_id == current_user.id)
         .order_by(col(TaskRun.started_at).desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -382,6 +401,61 @@ async def list_task_runs(
         )
         for r in runs
     ]
+
+
+@router.get("/{task_id}/runs/stats", response_model=TaskRunStatsResponse)
+async def get_task_run_stats(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return run totals for one owned task."""
+    await _get_owned_task(task_id, current_user, session)
+    result = await session.execute(
+        select(TaskRun.status, func.count())
+        .where(
+            TaskRun.task_id == task_id,
+            TaskRun.user_id == current_user.id,
+        )
+        .group_by(TaskRun.status)
+    )
+    counts = {run_status: count for run_status, count in result.all()}
+    total = sum(counts.values())
+    success_count = counts.get("success", 0)
+    failed_count = counts.get("failed", 0)
+    return TaskRunStatsResponse(
+        total=total,
+        success=success_count,
+        failed=failed_count,
+        other=total - success_count - failed_count,
+    )
+
+
+@router.delete("/{task_id}/runs")
+async def delete_task_runs(
+    task_id: int,
+    status: Optional[str] = Query(
+        None, description="留空删除全部; 'success' 仅删成功; 'failed' 仅删失败 (QD v1 /task/N/log/del 对应)"
+    ),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete run history for a task (all / success only / failed only)."""
+    if status is not None and status not in ("success", "failed"):
+        raise HTTPException(status_code=422, detail="status must be 'success' or 'failed'")
+
+    await _get_owned_task(task_id, current_user, session)
+
+    filters = [TaskRun.task_id == task_id, TaskRun.user_id == current_user.id]
+    if status is not None:
+        filters.append(TaskRun.status == status)
+    count_result = await session.execute(
+        select(func.count()).select_from(TaskRun).where(*filters)
+    )
+    deleted = count_result.scalar_one()
+    await session.execute(sql_delete(TaskRun).where(*filters))
+    await session.commit()
+    return {"deleted": deleted, "task_id": task_id, "status": status or "all"}
 
 
 # --- Cookie session management ---
@@ -409,6 +483,112 @@ async def _get_owned_task(task_id: int, current_user: User, session: AsyncSessio
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+async def _validate_group(
+    group_id: Optional[int], current_user: User, session: AsyncSession
+) -> None:
+    if group_id is None:
+        return
+    result = await session.execute(
+        select(TaskGroup.id).where(
+            TaskGroup.id == group_id,
+            TaskGroup.user_id == current_user.id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Task group not found")
+
+
+async def _validate_task_relations(
+    template_id: int,
+    group_id: Optional[int],
+    current_user: User,
+    session: AsyncSession,
+) -> None:
+    result = await session.execute(
+        select(Template.id).where(
+            Template.id == template_id,
+            Template.user_id == current_user.id,
+            Template.enabled == True,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    await _validate_group(group_id, current_user, session)
+
+
+def _validate_task_config(schedule_config: dict, execution_config: dict) -> None:
+    if not isinstance(schedule_config, dict) or not isinstance(execution_config, dict):
+        raise HTTPException(status_code=422, detail="Task configuration must be an object")
+
+    schedule_type = schedule_config.get("schedule_type", "interval")
+    if schedule_type == "interval":
+        try:
+            interval = int(schedule_config.get("interval_seconds", 3600))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Invalid interval_seconds") from exc
+        if not 1 <= interval <= 365 * 24 * 3600:
+            raise HTTPException(status_code=422, detail="interval_seconds is out of range")
+    elif schedule_type == "cron":
+        from apscheduler.triggers.cron import CronTrigger
+
+        expression = str(schedule_config.get("cron_expression", ""))
+        parts = expression.split()
+        if len(parts) != 5:
+            raise HTTPException(status_code=422, detail="cron_expression must have 5 fields")
+        try:
+            CronTrigger(
+                minute=parts[0],
+                hour=parts[1],
+                day=parts[2],
+                month=parts[3],
+                day_of_week=parts[4],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid cron_expression: {exc}") from exc
+    elif schedule_type == "daily":
+        run_time = schedule_config.get("run_time", "")
+        if not any(
+            _is_time_format(run_time, time_format)
+            for time_format in ("%H:%M:%S", "%H:%M")
+        ):
+            raise HTTPException(status_code=422, detail="run_time must be HH:MM or HH:MM:SS")
+    elif schedule_type == "once":
+        run_at = schedule_config.get("run_at")
+        if run_at:
+            try:
+                datetime.fromisoformat(str(run_at))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Invalid run_at") from exc
+    else:
+        raise HTTPException(status_code=422, detail="Invalid schedule_type")
+
+    bounds = {
+        "retry_count": (0, 10),
+        "retry_interval_seconds": (0, 86400),
+        "random_delay_min": (0, 86400),
+        "random_delay_max": (0, 86400),
+    }
+    values: dict[str, int] = {}
+    for key, (minimum, maximum) in bounds.items():
+        try:
+            value = int(execution_config.get(key, 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid {key}") from exc
+        if not minimum <= value <= maximum:
+            raise HTTPException(status_code=422, detail=f"{key} is out of range")
+        values[key] = value
+    if values["random_delay_min"] > values["random_delay_max"]:
+        raise HTTPException(status_code=422, detail="random delay minimum exceeds maximum")
+
+
+def _is_time_format(value, time_format: str) -> bool:
+    try:
+        datetime.strptime(str(value), time_format)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 @router.get("/{task_id}/cookies", response_model=CookieSessionResponse)

@@ -40,6 +40,8 @@ from qd_core.filters.crypto import (
     aes_encrypt,
     passlib_or_crypt,
     regex_escape_posix_basic,
+    rsa_decrypt,
+    rsa_encrypt,
     switch_mode,
 )
 from qd_core.utils.log import Log
@@ -485,6 +487,8 @@ jinja_globals = {
     "hash": get_hash,
     "aes_encrypt": _aes_encrypt,
     "aes_decrypt": _aes_decrypt,
+    "rsa_encrypt": rsa_encrypt,
+    "rsa_decrypt": rsa_decrypt,
     # time
     "timestamp": timestamp,
     "date_time": get_date_time,

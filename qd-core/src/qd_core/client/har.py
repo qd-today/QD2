@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from qd_core.schemas.har import HARData, HARRequest, HARTemplate
+from qd_core.schemas.har import HARRequest, HARTemplate
 from qd_core.utils.log import Log
 
 logger = Log("QD.Core.HARParser").getlogger()

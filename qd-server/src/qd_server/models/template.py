@@ -1,7 +1,6 @@
 """Template model for QD2."""
 
 from typing import Optional
-import json
 
 from sqlmodel import Field, Column, JSON
 from qd_server.models.base import BaseModel

@@ -47,10 +47,10 @@ def run(
         tmpl = HARParser.parse_file(template)
     except FileNotFoundError:
         console.print(f"[bold red]Error:[/] Template file not found: {template}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     except Exception as e:
         console.print(f"[bold red]Error:[/] Failed to parse template: {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     # Parse variables
     variables = {}
@@ -109,13 +109,13 @@ def parse(
         tmpl = HARParser.parse_file(template)
     except FileNotFoundError:
         console.print(f"[bold red]Error:[/] Template file not found: {template}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     except Exception as e:
         console.print(f"[bold red]Error:[/] Failed to parse template: {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     # Display template info
-    console.print(f"\n[bold]Template Information[/]")
+    console.print("\n[bold]Template Information[/]")
     console.print(f"  Name:        {tmpl.name}")
     console.print(f"  Description: {tmpl.description or '(none)'}")
     console.print(f"  Version:     {tmpl.version}")
@@ -125,7 +125,7 @@ def parse(
 
     # Display variables
     if tmpl.variables:
-        console.print(f"\n[bold]Variables[/]")
+        console.print("\n[bold]Variables[/]")
         for key, value in tmpl.variables.items():
             console.print(f"  {key}: {value}")
 
@@ -173,9 +173,9 @@ def plugin(
         import asyncio
         success = asyncio.run(pm.install_plugin(name))
         if success:
-            console.print(f"[bold green]✓[/] Plugin installed successfully")
+            console.print("[bold green]✓[/] Plugin installed successfully")
         else:
-            console.print(f"[bold red]✗[/] Failed to install plugin")
+            console.print("[bold red]✗[/] Failed to install plugin")
             raise typer.Exit(1)
 
     elif action == "uninstall":
@@ -185,7 +185,7 @@ def plugin(
         console.print(f"[bold blue]Uninstalling plugin:[/] {name}")
         import asyncio
         asyncio.run(pm.uninstall_plugin(name))
-        console.print(f"[bold green]✓[/] Plugin uninstalled")
+        console.print("[bold green]✓[/] Plugin uninstalled")
 
     else:
         console.print(f"[bold red]Error:[/] Unknown action: {action}")

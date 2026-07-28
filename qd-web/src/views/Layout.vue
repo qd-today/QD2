@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { NIcon, type MenuOption } from 'naive-ui'
 import {
@@ -90,6 +90,17 @@ function logout() {
   authStore.logout()
   router.push('/login')
 }
+
+function handleMenuSelect(key: string) {
+  if (key !== route.path) router.push(key)
+}
+
+function openLogs() {
+  showLogs.value = true
+}
+
+onMounted(() => window.addEventListener('qd:open-logs', openLogs))
+onBeforeUnmount(() => window.removeEventListener('qd:open-logs', openLogs))
 </script>
 
 <template>
@@ -114,6 +125,7 @@ function logout() {
         :collapsed-width="64"
         :collapsed-icon-size="20"
         :options="menuOptions"
+        @update:value="handleMenuSelect"
       />
     </n-layout-sider>
 

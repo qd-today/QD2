@@ -13,14 +13,23 @@ router = APIRouter()
 
 
 async def _authenticate_ws(token: str) -> int | None:
-    """Validate JWT and return user_id, or None."""
+    """Validate JWT and current account status, then return user_id."""
+    from sqlmodel import select
+
+    from qd_server.config import get_settings
     from qd_server.middleware.auth import decode_token
+    from qd_server.models.user import User
 
     try:
         payload = decode_token(token)
         if payload.get("type") != "access":
             return None
-        return int(payload["sub"])
+        user_id = int(payload["sub"])
+        async with get_settings().db.scoped_session() as session:
+            result = await session.execute(
+                select(User.id).where(User.id == user_id, User.is_active == True)
+            )
+            return user_id if result.scalar_one_or_none() is not None else None
     except Exception:
         return None
 

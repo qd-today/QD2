@@ -5,7 +5,6 @@ This module provides the foundational plugin infrastructure:
 - api_function_plugin: decorator to register functions as discoverable plugins with optional API routes
 """
 
-import asyncio
 import sys
 from enum import Enum
 from functools import partial, wraps
@@ -42,9 +41,9 @@ def add_api_routes(
     path_list: List[str],
     function: Callable,
     method_list: List[List[str]],
-    router_kwargs: Dict = {},
+    router_kwargs: Optional[Dict] = None,
     custom_router: Optional[APIRouter] = None,
-    router_inclusion_kwargs: Dict = {},
+    router_inclusion_kwargs: Optional[Dict] = None,
 ) -> None:
     """Add API routes to a FastAPI router.
 
@@ -56,8 +55,10 @@ def add_api_routes(
         custom_router: Custom router to use instead of the default.
         router_inclusion_kwargs: Kwargs for include_router.
     """
+    router_kwargs = router_kwargs or {}
+    router_inclusion_kwargs = router_inclusion_kwargs or {}
     target_router = custom_router or router
-    for path, methods in zip(path_list, method_list):
+    for path, methods in zip(path_list, method_list, strict=False):
         target_router.add_api_route(path, function, methods=methods, **router_kwargs)
         logger_plugins.debug("Added API route: %s %s", path, methods)
     if custom_router:

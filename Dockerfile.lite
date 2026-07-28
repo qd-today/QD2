@@ -9,21 +9,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Copy workspace files
-COPY pyproject.toml ./
-COPY qd-core/pyproject.toml ./qd-core/
-COPY qd-server/pyproject.toml ./qd-server/
-
-# Install dependencies
-RUN uv sync --no-dev --all-packages
-
-# Copy source code
+# Copy the locked workspace and install it
+COPY pyproject.toml uv.lock ./
 COPY qd-core/ ./qd-core/
+COPY qd-cli/ ./qd-cli/
 COPY qd-server/ ./qd-server/
+RUN uv sync --frozen --no-dev --all-packages
 
-# Install packages
-RUN uv sync --no-dev --all-packages
-
+ENV QD_PORT=8080
 EXPOSE 8080
 
-CMD ["uv", "run", "qd-server"]
+CMD ["uv", "run", "--frozen", "--no-dev", "qd-server"]

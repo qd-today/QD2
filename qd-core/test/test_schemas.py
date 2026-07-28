@@ -1,7 +1,6 @@
 """Tests for QD Core schemas."""
 
-import pytest
-from qd_core.schemas.har import HARRequest, HARResponse, HARTemplate, HTTPMethod
+from qd_core.schemas.har import HARRequest, HARTemplate, HTTPMethod
 from qd_core.schemas.task import ScheduleConfig, ScheduleType, TaskStatus
 
 

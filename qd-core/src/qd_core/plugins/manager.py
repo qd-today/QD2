@@ -4,14 +4,14 @@ Handles plugin lifecycle: discovery, installation, enabling, disabling, and unin
 Uses plux for plugin discovery and importlib.metadata for package management.
 """
 
-import asyncio
 import importlib.metadata as importlib_metadata
 import sys
-from typing import Dict, Optional
+from typing import Any, Dict
 
 from plux import Plugin, PluginManager  # type: ignore
+from plux.runtime.metadata import MetadataEntryPointsResolver
+from plux.runtime.resolve import MetadataPluginFinder
 
-from qd_core.plugins.base import logger_plugins
 from qd_core.utils.log import Log
 
 logger = Log("QD.Core.PluginManager").getlogger()
@@ -27,8 +27,23 @@ class QDPluginManager:
 
     def __init__(self, namespace: str, strict_default_plugins: bool = True):
         self.namespace = namespace
-        self.plugin_manager = PluginManager(namespace)
-        self._default_plugins_manager = PluginManager("qd.plugins.default")
+        # Plux's default resolver writes to the OS user cache. QD2 can run in
+        # read-only containers, so use importlib.metadata directly instead.
+        self.plugin_manager = PluginManager(
+            namespace,
+            finder=MetadataPluginFinder(
+                namespace,
+                entry_points_resolver=MetadataEntryPointsResolver(),
+            ),
+        )
+        default_namespace = "qd.plugins.default"
+        self._default_plugins_manager = PluginManager(
+            default_namespace,
+            finder=MetadataPluginFinder(
+                default_namespace,
+                entry_points_resolver=MetadataEntryPointsResolver(),
+            ),
+        )
         self._strict_default_plugins = strict_default_plugins
         self.enabled_plugins: Dict[str, Plugin] = {}
 

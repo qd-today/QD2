@@ -2,7 +2,6 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from typing import Optional
 
 from qd_server.middleware.auth import get_current_user, require_admin
 from qd_server.models.user import User
@@ -80,6 +79,6 @@ async def uninstall_plugin(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
-        )
+        ) from e
 
     return {"message": f"Plugin '{plugin_name}' uninstalled"}

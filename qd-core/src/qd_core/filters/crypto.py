@@ -240,3 +240,47 @@ def passlib_or_crypt(secret, algorithm, salt=None, salt_size=None, rounds=None, 
 def regex_escape_posix_basic(value: str) -> str:
     """Escape POSIX BRE special characters."""
     return re.sub(r"([].[^$*\\])", r"\\\1", value)
+
+
+# --- RSA (ported from QD v1 web/handlers/util.py UtilRSAHandler) ---
+
+def _normalize_rsa_key(key: str) -> str:
+    """Normalize a PEM key: accept single-line PEM (as QD v1 does) or standard PEM."""
+    if "\n" in key.strip() and key.strip().count("\n") > 1:
+        return key
+    markers = re.findall(r"-----.*?-----", key)
+    if len(markers) != 2:
+        raise ValueError("证书格式错误 (invalid PEM markers)")
+    body = key
+    for m in markers:
+        body = body.replace(m, "")
+    body = body.strip().replace(" ", "")
+    lines = "\n".join(body[i: i + 64] for i in range(0, len(body), 64))
+    return markers[0] + "\n" + lines + "\n" + markers[1]
+
+
+def rsa_encrypt(data: Union[str, bytes], key: str) -> str:
+    """RSA PKCS1_v1_5 encrypt, returns base64 string (QD v1 compatible)."""
+    from Crypto.Cipher import PKCS1_v1_5
+    from Crypto.PublicKey import RSA
+
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    cipher = PKCS1_v1_5.new(RSA.import_key(_normalize_rsa_key(key)))
+    return base64.b64encode(cipher.encrypt(data)).decode("utf-8")
+
+
+def rsa_decrypt(data: Union[str, bytes], key: str) -> str:
+    """RSA PKCS1_v1_5 decrypt of a base64 string (QD v1 compatible)."""
+    from Crypto.Cipher import PKCS1_v1_5
+    from Crypto.PublicKey import RSA
+
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    raw = base64.b64decode(data)
+    cipher = PKCS1_v1_5.new(RSA.import_key(_normalize_rsa_key(key)))
+    sentinel = crypto_random_new().read(16)
+    result = cipher.decrypt(raw, sentinel)
+    if result == sentinel:
+        raise ValueError("RSA decrypt failed")
+    return result.decode("utf-8")

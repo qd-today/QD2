@@ -1,7 +1,6 @@
 """Tests for the QD v1 compatible rule engine (asserts + variable extraction)."""
 
 import httpx
-import pytest
 
 from qd_core.client.rule import run_rule
 from qd_core.schemas.har import AssertRule, ExtractRule, RequestRule

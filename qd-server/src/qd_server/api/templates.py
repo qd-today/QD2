@@ -10,6 +10,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from qd_server.middleware.auth import get_current_user, get_session
 from qd_server.models.template import Template
+from qd_server.models.task import Task
 from qd_server.models.user import User
 
 router = APIRouter()
@@ -196,6 +197,7 @@ async def update_template(
         raise HTTPException(status_code=404, detail="Template not found")
 
     update_data = request.model_dump(exclude_unset=True)
+    enabled_changed = "enabled" in update_data and update_data["enabled"] != template.enabled
     for key, value in update_data.items():
         setattr(template, key, value)
 
@@ -203,6 +205,21 @@ async def update_template(
     session.add(template)
     await session.commit()
     await session.refresh(template)
+
+    if enabled_changed:
+        from qd_server.services.scheduler import scheduler
+
+        tasks_result = await session.execute(
+            select(Task).where(
+                Task.template_id == template.id,
+                Task.user_id == current_user.id,
+            )
+        )
+        for task in tasks_result.scalars().all():
+            if template.enabled and task.status not in ("paused", "disabled"):
+                scheduler.add_task(task)
+            else:
+                scheduler.remove_task(task.id)
 
     return TemplateResponse(
         id=template.id,
@@ -236,6 +253,10 @@ async def delete_template(
 
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
+
+    task_result = await session.execute(select(Task.id).where(Task.template_id == template_id).limit(1))
+    if task_result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="Template is used by a task")
 
     await session.delete(template)
     await session.commit()
@@ -334,7 +355,6 @@ async def import_template(
     session: AsyncSession = Depends(get_session),
 ):
     """Import a template from QD2 JSON or HAR format."""
-    from fastapi import Request as FastAPIRequest
     body = await request.json()
 
     # Detect format

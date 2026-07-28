@@ -5,13 +5,18 @@ import api from '@/api'
 
 const message = useMessage()
 const content = ref('')
+const notepadId = ref<number | null>(null)
 const loading = ref(true)
 const saving = ref(false)
 
 onMounted(async () => {
   try {
     const res = await api.get('/api/notepad')
-    content.value = res.data.content || ''
+    const first = Array.isArray(res.data) ? res.data[0] : res.data
+    if (first) {
+      notepadId.value = first.id
+      content.value = first.content || ''
+    }
   } catch {
     // notepad may be empty
   } finally {
@@ -22,7 +27,12 @@ onMounted(async () => {
 async function save() {
   saving.value = true
   try {
-    await api.put('/api/notepad', { content: content.value })
+    if (notepadId.value === null) {
+      const res = await api.post('/api/notepad', { title: '记事本', content: content.value })
+      notepadId.value = res.data.id
+    } else {
+      await api.put(`/api/notepad/${notepadId.value}`, { content: content.value })
+    }
     message.success('已保存')
   } catch (e: any) {
     message.error(e.response?.data?.detail || '保存失败')

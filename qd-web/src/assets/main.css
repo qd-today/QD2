@@ -1,5 +1,8 @@
 @import 'tailwindcss';
 
+/* Keep utility dark variants aligned with the Naive UI theme toggle. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* Naive UI handles component theming; Tailwind only for layout/spacing utils */
 html,
 body,

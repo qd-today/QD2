@@ -2,7 +2,6 @@
 
 import json
 import pytest
-from pathlib import Path
 
 from qd_core.client.har import HARParser
 from qd_core.schemas.har import HARTemplate

@@ -7,9 +7,11 @@ database, JWT authentication, and scheduler configuration.
 from asyncio import current_task
 from enum import Enum
 from functools import cached_property, lru_cache
+import os
 from pathlib import Path
+import secrets
 from typing import Optional, Union, cast
-from urllib.parse import ParseResult, urlencode, urlparse
+from urllib.parse import urlparse
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from qd_core.config import QDCoreSettings
@@ -70,11 +72,14 @@ class MysqlSettings(QDCoreSettings):
         return f"{self.db_schema}+{self.driver}://{self.username}{password_part}@{self.hostname}:{self.port}/{self.database}"
 
 
+DEFAULT_JWT_SECRET = "change-me-in-production"
+
+
 class JWTSettings(QDCoreSettings):
     """JWT authentication settings."""
 
     secret_key: str = Field(
-        default="change-me-in-production",
+        default=DEFAULT_JWT_SECRET,
         alias="QD_JWT_SECRET",
         description="JWT signing secret key",
     )
@@ -141,6 +146,26 @@ class QDServerSettings(QDCoreSettings):
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8924)
     reload: bool = Field(default=False)
+
+
+def ensure_jwt_secret(settings: QDServerSettings) -> None:
+    """Replace the insecure development default with a persistent random key."""
+    if settings.jwt.secret_key != DEFAULT_JWT_SECRET:
+        return
+
+    settings.ensure_config_dir()
+    secret_path = settings.config_dir / "jwt-secret"
+    try:
+        descriptor = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        secret = secret_path.read_text(encoding="ascii").strip()
+    else:
+        secret = secrets.token_urlsafe(48)
+        with os.fdopen(descriptor, "w", encoding="ascii") as secret_file:
+            secret_file.write(secret)
+    if len(secret) < 32:
+        raise RuntimeError(f"JWT secret file is invalid: {secret_path}")
+    settings.jwt.secret_key = secret
 
 
 @lru_cache

@@ -4,7 +4,7 @@ FROM node:20-alpine AS frontend-build
 
 WORKDIR /app/qd-web
 COPY qd-web/package.json qd-web/package-lock.json* ./
-RUN npm install
+RUN npm ci
 COPY qd-web/ ./
 RUN npm run build
 
@@ -16,27 +16,18 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Copy workspace files
-COPY pyproject.toml ./
-COPY qd-core/pyproject.toml ./qd-core/
-COPY qd-cli/pyproject.toml ./qd-cli/
-COPY qd-server/pyproject.toml ./qd-server/
-
-# Install dependencies
-RUN uv sync --no-dev --all-packages
-
-# Copy source code
+# Copy the locked workspace and install it
+COPY pyproject.toml uv.lock ./
 COPY qd-core/ ./qd-core/
 COPY qd-cli/ ./qd-cli/
 COPY qd-server/ ./qd-server/
+RUN uv sync --frozen --no-dev --all-packages
 
 # Copy frontend build
-COPY --from=frontend-build /app/qd-web/dist ./qd-server/src/qd_server/static
-
-# Install packages
-RUN uv sync --no-dev --all-packages
+COPY --from=frontend-build /app/qd-web/dist ./qd-web/dist
 
 # Expose port
+ENV QD_PORT=8080
 EXPOSE 8080
 
 # Health check
@@ -44,4 +35,4 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
 
 # Run server
-CMD ["uv", "run", "qd-server"]
+CMD ["uv", "run", "--frozen", "--no-dev", "qd-server"]

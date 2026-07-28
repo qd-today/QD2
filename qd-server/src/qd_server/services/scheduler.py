@@ -6,7 +6,7 @@ Manages scheduled task execution using APScheduler with async support.
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -52,18 +52,31 @@ class QDScheduler:
         """Load all active tasks from database and register them."""
         from qd_server.config import get_settings
         from qd_server.models.task import Task
+        from qd_server.models.template import Template
+        from qd_server.models.user import User
         from sqlmodel import select
         from sqlalchemy import not_
 
         settings = get_settings()
         async with settings.db.scoped_session() as session:
             result = await session.execute(
-                select(Task).where(not_(Task.status.in_(["disabled", "paused"])))
+                select(Task)
+                .join(User, User.id == Task.user_id)
+                .join(Template, Template.id == Task.template_id)
+                .where(
+                    not_(Task.status.in_(["disabled", "paused"])),
+                    User.is_active == True,
+                    Template.enabled == True,
+                    Template.user_id == Task.user_id,
+                )
             )
             tasks = result.scalars().all()
 
             for task in tasks:
-                self._add_job(task)
+                try:
+                    self._add_job(task)
+                except Exception:
+                    logger.exception("Failed to schedule task %d", task.id)
 
             logger.info("Loaded %d scheduled tasks", len(tasks))
 
@@ -99,8 +112,21 @@ class QDScheduler:
 
         elif schedule_type == "daily":
             run_time = schedule_config.get("run_time", "00:00")
-            hour, minute = run_time.split(":")
-            trigger = CronTrigger(hour=int(hour), minute=int(minute))
+            parsed_time = None
+            for time_format in ("%H:%M:%S", "%H:%M"):
+                try:
+                    parsed_time = datetime.strptime(run_time, time_format)
+                    break
+                except (TypeError, ValueError):
+                    continue
+            if parsed_time is None:
+                logger.error("Task %d has invalid daily run_time: %r", task.id, run_time)
+                return
+            trigger = CronTrigger(
+                hour=parsed_time.hour,
+                minute=parsed_time.minute,
+                second=parsed_time.second,
+            )
 
         elif schedule_type == "once":
             run_at = schedule_config.get("run_at")
@@ -130,11 +156,11 @@ class QDScheduler:
             self.scheduler.remove_job(job_id)
             logger.info("Removed task %d from scheduler", task_id)
 
-    async def run_task_now(self, task_id: int) -> None:
+    async def run_task_now(self, task_id: int) -> Optional[Any]:
         """Immediately execute a task (manual trigger skips random delay)."""
-        await self._execute_task(task_id, manual=True)
+        return await self._execute_task(task_id, manual=True)
 
-    async def _execute_task(self, task_id: int, manual: bool = False) -> None:
+    async def _execute_task(self, task_id: int, manual: bool = False) -> Optional[Any]:
         """Execute a scheduled task.
 
         This is the core execution logic that:
@@ -144,8 +170,9 @@ class QDScheduler:
         4. Sends notifications if configured
         """
         from qd_server.config import get_settings
-        from qd_server.models.task import Task, TaskRun
+        from qd_server.models.task import Task
         from qd_server.models.template import Template
+        from qd_server.models.user import User
         from qd_core.client.har import HARParser
         from qd_core.client.fetcher import QDFetcher
         from qd_core.client.cookie_session import CookieSession
@@ -158,41 +185,27 @@ class QDScheduler:
 
         async with settings.db.scoped_session() as session:
             # Load task
-            result = await session.execute(select(Task).where(Task.id == task_id))
+            result = await session.execute(
+                select(Task)
+                .join(User, User.id == Task.user_id)
+                .where(Task.id == task_id, User.is_active == True)
+            )
             task = result.scalar_one_or_none()
 
             if task is None:
-                logger.error("Task %d not found", task_id)
-                return
-
-            # Load template
-            result = await session.execute(select(Template).where(Template.id == task.template_id))
-            template = template_model = result.scalar_one_or_none()
-
-            if template is None:
-                logger.error("Template %d not found for task %d", task.template_id, task_id)
-                return
-
-            # Parse template data
-            try:
-                har_template = HARParser.parse_dict(template.template_data)
-                har_template.name = template.name
-                har_template.variables.update(task.variables or {})
-            except Exception as e:
-                logger.error("Failed to parse template %d: %s", template.id, e)
-                await self._record_run(session, task, "failed", str(e))
-                return
-
-            # Restore persistent cookie session for this task
-            cookie_session = CookieSession().from_json(task.cookie_session or [])
+                logger.error("Task %d not found or user is disabled", task_id)
+                return None
+            if not manual and task.status in ("disabled", "paused"):
+                logger.info("Skipping inactive scheduled task %d", task_id)
+                return None
 
             # Execution options: retry / random delay / proxy
             exec_cfg = task.execution_config or {}
-            retry_count = max(0, int(exec_cfg.get("retry_count", 0) or 0))
-            retry_interval = max(0, int(exec_cfg.get("retry_interval_seconds", 30) or 30))
             delay_min = max(0, int(exec_cfg.get("random_delay_min", 0) or 0))
             delay_max = max(delay_min, int(exec_cfg.get("random_delay_max", 0) or 0))
-            proxy = (exec_cfg.get("proxy") or "").strip() or None
+
+            # End the read transaction before a potentially long delay.
+            await session.commit()
 
             # Random pre-execution delay (avoid fixed-time detection)
             if delay_max > 0 and not manual:
@@ -201,6 +214,53 @@ class QDScheduler:
                 delay = _random.uniform(delay_min, delay_max)
                 logger.info("Task %d random delay %.1fs before run", task_id, delay)
                 await asyncio.sleep(delay)
+
+            # State may have changed during the delay. Reload task and template
+            # before doing network work, while keeping manual runs available for
+            # paused tasks owned by an active user.
+            result = await session.execute(
+                select(Task)
+                .join(User, User.id == Task.user_id)
+                .where(Task.id == task_id, User.is_active == True)
+            )
+            task = result.scalar_one_or_none()
+            if task is None or (not manual and task.status in ("disabled", "paused")):
+                logger.info("Task %d became inactive before execution", task_id)
+                await session.commit()
+                return None
+
+            result = await session.execute(
+                select(Template).where(
+                    Template.id == task.template_id,
+                    Template.user_id == task.user_id,
+                    Template.enabled == True,
+                )
+            )
+            template = result.scalar_one_or_none()
+            if template is None:
+                logger.error("Template %d not found for task %d", task.template_id, task_id)
+                await session.commit()
+                return None
+
+            await session.commit()
+
+            # Parse template data
+            try:
+                har_template = HARParser.parse_dict(template.template_data)
+                har_template.name = template.name
+                har_template.variables.update(task.variables or {})
+            except Exception as e:
+                logger.error("Failed to parse template %d: %s", template.id, e)
+                return await self._record_run(session, task, "failed", str(e))
+
+            # Restore persistent cookie session for this task
+            cookie_session = CookieSession().from_json(task.cookie_session or [])
+
+            # Apply the latest retry/proxy settings after the state reload.
+            exec_cfg = task.execution_config or {}
+            retry_count = max(0, int(exec_cfg.get("retry_count", 0) or 0))
+            retry_interval = max(0, int(exec_cfg.get("retry_interval_seconds", 30) or 30))
+            proxy = (exec_cfg.get("proxy") or "").strip() or None
 
             started_at = datetime.utcnow()
             log_stream.publish(
@@ -262,7 +322,7 @@ class QDScheduler:
             except Exception as ce:
                 logger.warning("Failed to serialize cookie session for task %d: %s", task_id, ce)
 
-            await self._record_run(
+            run = await self._record_run(
                 session, task, status_str, error_msg,
                 started_at, finished_at, duration,
             )
@@ -275,8 +335,9 @@ class QDScheduler:
 
             # Send notifications
             await self._send_notifications(
-                session, task.name, status_str, error_msg, duration
+                session, task.id, task.user_id, task.name, status_str, error_msg, duration
             )
+            return run
 
     async def _record_run(
         self,
@@ -287,7 +348,7 @@ class QDScheduler:
         started_at: Optional[datetime] = None,
         finished_at: Optional[datetime] = None,
         duration: Optional[float] = None,
-    ) -> None:
+    ) -> Any:
         """Record a task execution run."""
         from qd_server.models.task import TaskRun
 
@@ -309,10 +370,13 @@ class QDScheduler:
 
         await session.commit()
         logger.info("Task %d run recorded: %s", task.id, status_str)
+        return run
 
     async def _send_notifications(
         self,
         session,
+        task_id: int,
+        user_id: int,
         task_name: str,
         status: str,
         error_message: Optional[str] = None,
@@ -321,9 +385,16 @@ class QDScheduler:
         """Send notifications for task completion."""
         from qd_server.models.notification import Notification
         from qd_server.services.notification import send_notification
+        from sqlalchemy import or_
         from sqlmodel import select
 
-        result = await session.execute(select(Notification).where(Notification.enabled == True))
+        result = await session.execute(
+            select(Notification).where(
+                Notification.user_id == user_id,
+                Notification.enabled == True,
+                or_(Notification.task_id.is_(None), Notification.task_id == task_id),
+            )
+        )
         notifications = result.scalars().all()
 
         for notif in notifications:
@@ -334,7 +405,7 @@ class QDScheduler:
                 if status == "failed" and not notif.on_failure:
                     continue
 
-                config = notif.config or {}
+                config = dict(notif.config or {})
                 config["type"] = notif.notification_type
 
                 await send_notification(

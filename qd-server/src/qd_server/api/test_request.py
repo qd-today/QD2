@@ -2,12 +2,12 @@
 
 import shlex
 import json
-import re
-from typing import Optional
+import time
+from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from qd_server.middleware.auth import get_current_user
 from qd_server.models.user import User
 
@@ -18,12 +18,13 @@ router = APIRouter()
 
 class TestRequest(BaseModel):
     """A single HTTP request to test."""
-    method: str = "GET"
-    url: str
-    headers: dict[str, str] = {}
-    body: Optional[str] = None
-    body_type: str = "none"  # none, json, form, text
-    timeout: int = 30
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] = "GET"
+    url: str = Field(min_length=1, max_length=4096)
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: Optional[str] = Field(default=None, max_length=1024 * 1024)
+    body_type: Literal["none", "json", "form", "text"] = "none"
+    timeout: int = Field(default=30, ge=1, le=120)
+    verify_tls: bool = True
 
 
 class TestResponse(BaseModel):
@@ -80,31 +81,40 @@ async def test_request(
             elif request.body_type == "text":
                 content = request.body.encode()
 
+        started = time.perf_counter()
         async with httpx.AsyncClient(
             timeout=request.timeout,
             follow_redirects=True,
-            verify=False,
+            verify=request.verify_tls,
         ) as client:
-            response = await client.request(
+            async with client.stream(
                 method=request.method.upper(),
                 url=request.url,
                 headers=headers,
                 content=content,
-            )
-
-            # Build response headers
-            resp_headers = dict(response.headers)
-
-            # Truncate body if too large
-            body_text = response.text
-            if len(body_text) > 50000:
-                body_text = body_text[:50000] + "\n... (truncated)"
+            ) as response:
+                resp_headers = dict(response.headers)
+                body = bytearray()
+                truncated = False
+                async for chunk in response.aiter_bytes():
+                    remaining = 50000 - len(body)
+                    if remaining <= 0:
+                        truncated = True
+                        break
+                    body.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        truncated = True
+                        break
+                encoding = response.encoding or "utf-8"
+                body_text = bytes(body).decode(encoding, errors="replace")
+                if truncated:
+                    body_text += "\n... (truncated)"
 
             return TestResponse(
                 status_code=response.status_code,
                 headers=resp_headers,
                 body=body_text,
-                elapsed_ms=response.elapsed.total_seconds() * 1000,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
             )
 
     except httpx.TimeoutException:
@@ -191,7 +201,7 @@ async def parse_curl(
         )
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse cURL: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse cURL: {e}") from e
 
 
 @router.post("/parse-har", response_model=list[ParsedRequest])
@@ -214,10 +224,10 @@ async def parse_har(
         entries = har_data.get("log", {}).get("entries", [])
         return _parse_standard_har(entries)
 
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON in HAR file")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON in HAR file") from exc
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse HAR: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse HAR: {e}") from e
 
 
 def _parse_qd_v1(data: list) -> list[ParsedRequest]:
@@ -267,44 +277,6 @@ def _parse_qd_v1(data: list) -> list[ParsedRequest]:
             success_asserts=success_asserts if success_asserts else None,
             failed_asserts=failed_asserts if failed_asserts else None,
             extract_variables=extract_variables if extract_variables else None,
-        ))
-
-    return parsed
-
-
-def _parse_standard_har(entries: list) -> list[ParsedRequest]:
-    """Parse standard HAR 1.2 format."""
-    parsed = []
-    for entry in entries:
-        har_req = entry.get("request", {})
-        method = har_req.get("method", "GET")
-        url = har_req.get("url", "")
-
-        # Extract headers
-        headers = {}
-        for h in har_req.get("headers", []):
-            headers[h.get("name", "")] = h.get("value", "")
-
-        # Extract body
-        body = None
-        body_type = "none"
-        post_data = har_req.get("postData", {})
-        if post_data:
-            body_type = post_data.get("mimeType", "text")
-            body = post_data.get("text")
-            if "json" in body_type:
-                body_type = "json"
-            elif "form" in body_type:
-                body_type = "form"
-            else:
-                body_type = "text"
-
-        parsed.append(ParsedRequest(
-            method=method,
-            url=url,
-            headers=headers,
-            body=body,
-            body_type=body_type,
         ))
 
     return parsed

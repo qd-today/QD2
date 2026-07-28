@@ -515,10 +515,14 @@ const extractorSourceOptions = [
         </div>
       </template>
       <n-empty v-if="variableList.length === 0" description="暂无变量" size="small" />
-      <div v-for="(v, i) in variableList" :key="i" class="flex gap-2 mb-2 items-center">
-        <n-input v-model:value="v.key" size="small" placeholder="variable_name" class="w-48" />
-        <span class="text-gray-400">=</span>
-        <n-input v-model:value="v.value" size="small" placeholder="默认值" class="flex-1" />
+      <div
+        v-for="(v, i) in variableList"
+        :key="i"
+        class="grid grid-cols-1 sm:grid-cols-[minmax(12rem,2fr)_auto_minmax(16rem,3fr)_auto] gap-2 mb-2 items-center"
+      >
+        <n-input v-model:value="v.key" size="small" placeholder="variable_name" class="w-full" />
+        <span class="hidden sm:inline text-gray-400">=</span>
+        <n-input v-model:value="v.value" size="small" placeholder="默认值" class="w-full" />
         <n-button size="tiny" quaternary type="error" @click="removeVariable(i)">✕</n-button>
       </div>
     </n-card>
@@ -705,16 +709,18 @@ const extractorSourceOptions = [
               <div
                 v-for="(ext, eIdx) in getExtractorList(detailRequest!)"
                 :key="eIdx"
-                class="flex items-center gap-2 mb-1 p-2 rounded bg-blue-50 dark:bg-blue-950"
+                class="grid grid-cols-1 md:grid-cols-[9rem_minmax(10rem,0.7fr)_minmax(16rem,1.3fr)_auto] items-start gap-2 mb-1 p-2 rounded bg-blue-50 dark:bg-blue-950"
               >
-                <n-select v-model:value="ext.source" size="small" class="w-28" :options="extractorSourceOptions" />
-                <n-input v-model:value="ext.key" size="small" placeholder="变量名" class="w-36" />
-                <n-input v-model:value="ext.value" size="small" placeholder="(.+)" class="w-64 font-mono" />
-                <span class="text-xs text-gray-400 font-mono truncate max-w-48">
+                <n-select v-model:value="ext.source" size="small" class="w-full" :options="extractorSourceOptions" />
+                <n-input v-model:value="ext.key" size="small" placeholder="变量名" class="w-full" />
+                <n-input v-model:value="ext.value" size="small" placeholder="(.+)" class="w-full font-mono" />
+                <n-button size="tiny" quaternary type="error" @click="removeExtractor(detailRequest!, eIdx)">✕</n-button>
+                <span
+                  class="md:col-span-4 text-xs text-gray-600 dark:text-gray-300 font-mono whitespace-pre-wrap break-all max-h-32 overflow-auto border-t border-blue-100 dark:border-blue-900 pt-2"
+                  :title="String(detailRequest._lastResponse ? extractValue(detailRequest._lastResponse, ext.value, ext.source) ?? '-' : '-')"
+                >
                   → {{ detailRequest._lastResponse ? extractValue(detailRequest._lastResponse, ext.value, ext.source) ?? '-' : '-' }}
                 </span>
-                <div class="flex-1" />
-                <n-button size="tiny" quaternary type="error" @click="removeExtractor(detailRequest!, eIdx)">✕</n-button>
               </div>
             </div>
 
@@ -744,12 +750,12 @@ const extractorSourceOptions = [
               />
               <pre
                 v-else-if="responseViewMode === 'render' && isJsonResponse"
-                class="text-xs font-mono whitespace-pre-wrap break-all max-h-96 overflow-auto p-3 rounded bg-gray-50 dark:bg-gray-800"
+                class="text-xs text-gray-800 dark:text-gray-100 font-mono whitespace-pre-wrap break-all max-h-96 overflow-auto p-3 rounded bg-gray-50 dark:bg-gray-800"
                 >{{ formatResponseBody(detailRequest._lastResponse.body) }}</pre
               >
               <pre
                 v-else
-                class="text-xs font-mono whitespace-pre-wrap break-all max-h-96 overflow-auto p-3 rounded bg-gray-50 dark:bg-gray-800"
+                class="text-xs text-gray-800 dark:text-gray-100 font-mono whitespace-pre-wrap break-all max-h-96 overflow-auto p-3 rounded bg-gray-50 dark:bg-gray-800"
                 >{{ detailRequest._lastResponse.body }}</pre
               >
             </div>

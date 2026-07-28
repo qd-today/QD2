@@ -16,6 +16,7 @@ const search = ref('')
 const loading = ref(false)
 const syncing = ref(false)
 const installing = ref<string | null>(null)
+const pageError = ref('')
 
 const showAddSource = ref(false)
 const newSource = ref({
@@ -24,11 +25,20 @@ const newSource = ref({
 })
 
 async function loadSources() {
-  const res = await api.get('/api/template-sources')
-  sources.value = res.data
-  if (sources.value.length > 0 && activeSource.value === null) {
-    activeSource.value = sources.value[0].id
-    await browse()
+  loading.value = true
+  pageError.value = ''
+  try {
+    const res = await api.get('/api/template-sources')
+    sources.value = res.data
+    if (sources.value.length > 0 && activeSource.value === null) {
+      activeSource.value = sources.value[0].id
+      await browse()
+    }
+  } catch (e: any) {
+    pageError.value = e.response?.data?.detail || '模板库加载失败，请稍后重试'
+    message.error(pageError.value)
+  } finally {
+    loading.value = false
   }
 }
 
@@ -82,12 +92,16 @@ async function sync() {
 async function browse() {
   if (!activeSource.value) return
   loading.value = true
+  pageError.value = ''
   try {
     const res = await api.get(`/api/template-sources/${activeSource.value}/templates`, {
       params: { search: search.value || undefined, page: page.value, page_size: pageSize },
     })
     items.value = res.data.items
     total.value = res.data.total
+  } catch (e: any) {
+    pageError.value = e.response?.data?.detail || '模板列表加载失败，请稍后重试'
+    message.error(pageError.value)
   } finally {
     loading.value = false
   }
@@ -119,6 +133,12 @@ onMounted(loadSources)
 
 <template>
   <div>
+    <n-alert v-if="pageError" type="error" title="模板库暂时不可用" class="mb-4">
+      <div class="flex items-center justify-between gap-3">
+        <span>{{ pageError }}</span>
+        <n-button size="small" @click="loadSources">重试</n-button>
+      </div>
+    </n-alert>
     <div class="flex flex-wrap items-center gap-3 mb-4">
       <n-select
         v-model:value="activeSource"

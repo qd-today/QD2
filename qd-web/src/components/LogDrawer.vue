@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch, nextTick } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import Cookies from 'js-cookie'
 
 const show = defineModel<boolean>('show', { default: false })
@@ -23,21 +23,45 @@ interface LogEvent {
 
 const events = ref<LogEvent[]>([])
 const connected = ref(false)
+const connectionError = ref('')
 let ws: WebSocket | null = null
+let reconnectTimer: number | null = null
+let active = true
 const listRef = ref<HTMLElement | null>(null)
 
 function connect() {
-  if (ws) return
+  if (!active || ws) return
   const token = Cookies.get('access_token') || ''
+  if (!token) {
+    connectionError.value = '登录凭证不可用'
+    return
+  }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  connectionError.value = ''
   ws = new WebSocket(`${proto}://${location.host}/api/ws/logs?token=${token}`)
   ws.onopen = () => (connected.value = true)
-  ws.onclose = () => {
+  ws.onerror = () => {
+    connectionError.value = '实时日志连接失败'
+  }
+  ws.onclose = (event) => {
     connected.value = false
     ws = null
+    if (!active) return
+    if (event.code === 4401) {
+      connectionError.value = '登录凭证已失效'
+      return
+    }
+    connectionError.value = '连接已断开，正在重连'
+    reconnectTimer = window.setTimeout(connect, 2000)
   }
   ws.onmessage = (e) => {
-    const ev: LogEvent = JSON.parse(e.data)
+    let ev: LogEvent
+    try {
+      ev = JSON.parse(e.data)
+    } catch {
+      connectionError.value = '收到无法解析的日志消息'
+      return
+    }
     if (ev.type === 'ping') return
     events.value.push(ev)
     if (events.value.length > 500) events.value.splice(0, events.value.length - 500)
@@ -48,14 +72,13 @@ function connect() {
 }
 
 function disconnect() {
+  active = false
+  if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
   ws?.close()
   ws = null
 }
 
-watch(show, (v) => {
-  if (v) connect()
-})
-
+onMounted(connect)
 onBeforeUnmount(disconnect)
 
 function eventColor(ev: LogEvent): string {
@@ -88,7 +111,7 @@ function eventText(ev: LogEvent): string {
         <div class="flex items-center gap-2">
           <span>实时执行日志</span>
           <n-tag :type="connected ? 'success' : 'error'" size="small" round>
-            {{ connected ? '已连接' : '未连接' }}
+            {{ connected ? '已连接' : connectionError || '连接中' }}
           </n-tag>
         </div>
       </template>

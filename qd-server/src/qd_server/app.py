@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from qd_server.api import api_router
-from qd_server.config import get_settings
+from qd_server.config import ensure_jwt_secret, get_settings
 
 logger = logging.getLogger("qd2")
 
@@ -22,6 +22,7 @@ async def lifespan(app: FastAPI):
     # Startup
     settings = get_settings()
     settings.ensure_config_dir()
+    ensure_jwt_secret(settings)
 
     # Initialize database tables
     from sqlmodel import SQLModel
@@ -47,8 +48,6 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
-    settings = get_settings()
-
     app = FastAPI(
         title="QD2 Server",
         description="HTTP Request Scheduled Task Automation Framework",
@@ -69,6 +68,11 @@ def create_app() -> FastAPI:
 
     # Include API routes
     app.include_router(api_router)
+
+    # QD v1 compatible /util/* routes (no /api prefix — templates call them directly)
+    from qd_server.api.util import router as util_router
+
+    app.include_router(util_router, prefix="/util", tags=["Util"])
 
     # WebSocket routes (full path declared in router)
     from qd_server.api.ws import router as ws_router
@@ -92,8 +96,13 @@ def create_app() -> FastAPI:
 
         @app.get("/{full_path:path}", include_in_schema=False)
         async def spa_fallback(full_path: str):
-            file_path = dist_dir / full_path
-            if full_path and file_path.is_file():
+            # Defense-in-depth: resolve and ensure the target stays inside dist_dir
+            file_path = (dist_dir / full_path).resolve()
+            try:
+                inside = file_path.is_relative_to(dist_dir.resolve())
+            except AttributeError:  # py<3.9 fallback (not expected)
+                inside = str(file_path).startswith(str(dist_dir.resolve()))
+            if full_path and inside and file_path.is_file():
                 return FileResponse(file_path)
             return FileResponse(dist_dir / "index.html")
 

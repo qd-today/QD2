@@ -9,6 +9,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     CookieManager: typeof import('./components/CookieManager.vue')['default']
     LogDrawer: typeof import('./components/LogDrawer.vue')['default']
+    NAlert: typeof import('naive-ui')['NAlert']
     NAvatar: typeof import('naive-ui')['NAvatar']
     NButton: typeof import('naive-ui')['NButton']
     NButtonGroup: typeof import('naive-ui')['NButtonGroup']
