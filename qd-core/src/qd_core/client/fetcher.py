@@ -173,6 +173,10 @@ class QDFetcher:
         content = None
         if request.postData and request.postData.text:
             content = render_string(request.postData.text, self.variables, cookies_view)
+            if request.postData.mimeType and not any(
+                name.lower() == "content-type" for name in headers
+            ):
+                headers["Content-Type"] = request.postData.mimeType
 
         # Execute request
         response = await client.request(

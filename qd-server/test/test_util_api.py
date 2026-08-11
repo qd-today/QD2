@@ -86,6 +86,23 @@ def test_request_api_supports_qd_internal_scheme(client):
     assert response.json()["body"] == "delay 0.0 second."
 
 
+def test_request_api_supports_post_form_internal_scheme(client):
+    response = client.post(
+        "/api/test/test",
+        json={
+            "method": "POST",
+            "url": "api://util/unicode",
+            "body_type": "form",
+            "body": r"html_unescape=false&content=%5Cu4f60%5Cu597d",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 200
+    assert response.json()["error"] is None
+    assert '"转换后": "你好"' in response.json()["body"]
+
+
 def test_request_api_reports_unsupported_internal_service(client):
     response = client.post(
         "/api/test/test",

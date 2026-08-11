@@ -1,7 +1,7 @@
 import httpx
 import pytest
 from qd_core.client.fetcher import QDFetcher, resolve_api_url
-from qd_core.schemas.har import HARRequest, HARTemplate
+from qd_core.schemas.har import HARPostData, HARRequest, HARTemplate
 
 
 @pytest.mark.asyncio
@@ -75,3 +75,35 @@ async def test_execute_template_skips_unchecked_requests() -> None:
 
     assert requested_paths == ["/executed"]
     assert len(results) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_template_uses_post_data_mime_type() -> None:
+    captured_request = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(200, text="ok")
+
+    fetcher = QDFetcher(transport=httpx.MockTransport(handler))
+    template = HARTemplate(
+        name="form-request",
+        requests=[
+            HARRequest(
+                method="POST",
+                url="https://example.test/form",
+                postData=HARPostData(
+                    mimeType="application/x-www-form-urlencoded",
+                    text="content=hello",
+                ),
+            )
+        ],
+    )
+
+    results = await fetcher.execute_template(template)
+
+    assert len(results) == 1
+    assert captured_request is not None
+    assert captured_request.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert captured_request.content == b"content=hello"

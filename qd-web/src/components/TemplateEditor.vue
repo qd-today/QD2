@@ -26,6 +26,22 @@ interface ExtractorRow {
   source: 'content' | 'status' | 'header'
   headerName?: string
 }
+interface ApiRulePreset {
+  re: string
+  from: 'content' | 'status'
+}
+interface ApiExtractorPreset extends ApiRulePreset {
+  name: string
+}
+interface ApiPreset {
+  label: string
+  method: 'GET' | 'POST'
+  url: string
+  comment: string
+  body?: string
+  successAsserts: ApiRulePreset[]
+  extractVariables?: ApiExtractorPreset[]
+}
 interface HARRequestData {
   method: string
   url: string
@@ -68,6 +84,21 @@ function ruleToLegacy(rule: any) {
   }
 }
 
+function inferBodyType(request: any): string {
+  if (request._bodyType) return request._bodyType
+  const mimeType = String(request.postData?.mimeType || request.mimeType || '').toLowerCase()
+  if (mimeType.includes('application/json')) return 'json'
+  if (mimeType.includes('application/x-www-form-urlencoded')) return 'form'
+  if (request.postData || Object.prototype.hasOwnProperty.call(request, 'data')) return 'text'
+  return 'none'
+}
+
+function bodyMimeType(bodyType: string): string {
+  if (bodyType === 'json') return 'application/json'
+  if (bodyType === 'form') return 'application/x-www-form-urlencoded'
+  return 'text/plain'
+}
+
 const template = reactive({
   name: props.initialData?.name || '',
   description: props.initialData?.description || '',
@@ -101,15 +132,15 @@ function parseRequestData(r: any): HARRequestData {
   const extractorList: ExtractorRow[] = []
   const declaredNames = new Set<string>()
   for (const extractor of rule.extract_variables || []) {
-    if (!extractor.name) continue
+    const name = extractor.name || ''
     const from = extractor.from || 'content'
     extractorList.push({
-      key: extractor.name,
+      key: name,
       value: extractor.re || '',
       source: from.startsWith('header') ? 'header' : from === 'status' ? 'status' : 'content',
       headerName: from.startsWith('header-') ? from.slice(7) : undefined,
     })
-    declaredNames.add(extractor.name)
+    if (name) declaredNames.add(name)
   }
 
   const legacyExtractors: Record<string, string> = {}
@@ -135,8 +166,8 @@ function parseRequestData(r: any): HARRequestData {
     checked: r.checked !== false,
     headers: r.headers || [],
     extractors: { ...legacyExtractors },
-    _bodyType: r._bodyType || (r.postData ? 'json' : 'none'),
-    _bodyContent: r.postData?.text || r.data || '',
+    _bodyType: inferBodyType(r),
+    _bodyContent: r.postData?.text ?? r.data ?? '',
     _conditions: conditions,
     _testing: false,
     _lastResponse: null,
@@ -170,38 +201,88 @@ const allRequestsChecked = computed(
 const requestClipboard = ref<HARRequestData | null>(null)
 const activeRequestIndex = ref<number | null>(null)
 
-const apiCatalog: Record<string, { label: string; url: string; comment: string }> = {
-  delay: { label: '延时', url: 'api://util/delay/3', comment: 'QD API - 延时 3 秒' },
-  timestamp: { label: '时间戳', url: 'api://util/timestamp', comment: 'QD API - 时间戳' },
+const status200: ApiRulePreset = { re: '200', from: 'status' }
+const jsonStatus200: ApiRulePreset = { re: '"状态": "200"', from: 'content' }
+const jsonStatusOk: ApiRulePreset = { re: '"状态": "OK"', from: 'content' }
+
+const apiCatalog: Record<string, ApiPreset> = {
+  delay: {
+    label: '延时',
+    method: 'GET',
+    url: 'api://util/delay/3',
+    comment: '延时3秒',
+    successAsserts: [status200],
+  },
+  timestamp: {
+    label: '时间戳',
+    method: 'POST',
+    url: 'api://util/timestamp',
+    comment: '返回对应时间戳和时间',
+    body: 'ts=&form=&dt=',
+    successAsserts: [status200],
+  },
   unicode: {
     label: 'Unicode 转中文',
-    url: 'api://util/unicode?content=%5Cu4f60%5Cu597d',
-    comment: 'QD API - Unicode 转中文',
+    method: 'POST',
+    url: 'api://util/unicode',
+    comment: 'Unicode转换',
+    body: 'html_unescape=false&content=%5Cu4f60%5Cu597d',
+    successAsserts: [status200, jsonStatus200],
+    extractVariables: [{ name: '', re: '"转换后": "(.*)"', from: 'content' }],
   },
   gb2312: {
     label: 'GB2312 编码',
-    url: 'api://util/gb2312?content=%E4%B8%AD%E6%96%87',
-    comment: 'QD API - GB2312 编码',
+    method: 'POST',
+    url: 'api://util/gb2312',
+    comment: 'GB2312编码',
+    body: 'content=%E4%B8%AD%E6%96%87',
+    successAsserts: [status200, jsonStatus200],
+    extractVariables: [{ name: '', re: '"转换后": "(.*)"', from: 'content' }],
   },
   urldecode: {
     label: 'URL 解码',
-    url: 'api://util/urldecode?content=%25E4%25BD%25A0%25E5%25A5%25BD',
-    comment: 'QD API - URL 解码',
+    method: 'POST',
+    url: 'api://util/urldecode',
+    comment: 'URL解码',
+    body: 'unquote_plus=false&encoding=utf-8&content=%25E4%25BD%25A0%25E5%25A5%25BD',
+    successAsserts: [status200, jsonStatus200],
+    extractVariables: [{ name: '', re: '"转换后": "(.*)"', from: 'content' }],
   },
   regex: {
     label: '正则表达式',
-    url: 'api://util/regex?data=A1%20b2&p=([a-z])(%5Cd)',
-    comment: 'QD API - 正则表达式',
+    method: 'POST',
+    url: 'api://util/regex',
+    comment: '正则提取',
+    body: 'p=(%5Cd%2B)&data=code%3D123',
+    successAsserts: [status200, jsonStatusOk],
+    extractVariables: [{ name: '', re: '"1": "(.*)"', from: 'content' }],
   },
   replace: {
     label: '字符串替换',
-    url: 'api://util/string/replace?s=a-1&p=%5Cd&t=x&r=text',
-    comment: 'QD API - 字符串替换',
+    method: 'POST',
+    url: 'api://util/string/replace',
+    comment: '字符串替换',
+    body: 'r=json&p=%5Cd&s=a-1&t=x',
+    successAsserts: [status200, jsonStatusOk],
+    extractVariables: [{ name: '', re: '"处理后字符串": "(.*)"', from: 'content' }],
   },
-  rsa: {
-    label: 'RSA 加密/解密',
-    url: 'api://util/rsa?f=encode&key={{rsa_key|urlencode}}&data={{rsa_data|urlencode}}',
-    comment: 'QD API - RSA 加密；请配置 rsa_key 和 rsa_data',
+  rsaEncrypt: {
+    label: 'RSA 加密',
+    method: 'POST',
+    url: 'api://util/rsa',
+    comment: 'RSA加密',
+    body: 'f=encode&key=&data=',
+    successAsserts: [status200],
+    extractVariables: [{ name: '', re: '(.*)', from: 'content' }],
+  },
+  rsaDecrypt: {
+    label: 'RSA 解密',
+    method: 'POST',
+    url: 'api://util/rsa',
+    comment: 'RSA解密',
+    body: 'f=decode&key=&data=',
+    successAsserts: [status200],
+    extractVariables: [{ name: '', re: '(.*)', from: 'content' }],
   },
 }
 
@@ -218,7 +299,11 @@ const apiRequestOptions = [
     key: 'string',
     children: ['regex', 'replace'].map((key) => ({ label: apiCatalog[key].label, key })),
   },
-  { label: '加密解密', key: 'crypto', children: [{ label: apiCatalog.rsa.label, key: 'rsa' }] },
+  {
+    label: '加密解密',
+    key: 'crypto',
+    children: ['rsaEncrypt', 'rsaDecrypt'].map((key) => ({ label: apiCatalog[key].label, key })),
+  },
 ]
 
 function methodType(method: string): any {
@@ -288,14 +373,54 @@ function toggleAllRequests(checked: boolean) {
   for (const request of template.requests) request.checked = checked
 }
 
+function splitRequestUrl(url: string) {
+  const hashIndex = url.indexOf('#')
+  const hash = hashIndex >= 0 ? url.slice(hashIndex) : ''
+  const withoutHash = hashIndex >= 0 ? url.slice(0, hashIndex) : url
+  const queryIndex = withoutHash.indexOf('?')
+  return {
+    base: queryIndex >= 0 ? withoutHash.slice(0, queryIndex) : withoutHash,
+    query: queryIndex >= 0 ? withoutHash.slice(queryIndex + 1) : '',
+    hash,
+  }
+}
+
+function handleMethodChange(request: HARRequestData, method: string) {
+  const previousMethod = request.method
+  request.method = method
+  request._lastResponse = null
+  request._conditionResults = []
+
+  if (previousMethod === method || !request.url.toLowerCase().startsWith('api://util/')) return
+
+  const { base, query, hash } = splitRequestUrl(request.url)
+  if (method === 'GET' && request._bodyType === 'form') {
+    const bodyQuery = request._bodyContent.replace(/^\?/, '')
+    const mergedQuery = [query, bodyQuery].filter(Boolean).join('&')
+    request.url = `${base}${mergedQuery ? `?${mergedQuery}` : ''}${hash}`
+    request._bodyType = 'none'
+    request._bodyContent = ''
+  } else if (method === 'POST') {
+    request.url = `${base}${hash}`
+    request._bodyType = 'form'
+    request._bodyContent = query
+  }
+}
+
 function insertApiRequest(key: string) {
   const preset = apiCatalog[key]
   if (!preset) return
   const request = parseRequestData({
-    method: 'GET',
+    method: preset.method,
     url: preset.url,
     checked: true,
     headers: [],
+    postData:
+      preset.body === undefined
+        ? undefined
+        : { mimeType: 'application/x-www-form-urlencoded', text: preset.body },
+    success_asserts: preset.successAsserts,
+    extract_variables: preset.extractVariables || [],
     _comment: preset.comment,
   })
   const insertAt = Math.min((activeRequestIndex.value ?? template.requests.length - 1) + 1, template.requests.length)
@@ -570,7 +695,9 @@ function getData(): any {
         _comment: r._comment,
         headers: r.headers.filter((h: HARHeader) => h.name),
         postData:
-          r._bodyType !== 'none' ? { mimeType: 'application/json', text: r._bodyContent } : undefined,
+          r._bodyType !== 'none'
+            ? { mimeType: bodyMimeType(r._bodyType), text: r._bodyContent }
+            : undefined,
         extractors: r._legacyExtractors || {},
         // QD v1 compatible rule block
         rule: {
@@ -581,7 +708,7 @@ function getData(): any {
             .filter((c: any) => c.outcome === 'failure')
             .map((c: any) => ({ re: c.value, from: c.type === 'status_code' ? 'status' : 'content' })),
           extract_variables: r._extractorList
-            .filter((e: ExtractorRow) => e.key && e.value)
+            .filter((e: ExtractorRow) => e.value)
             .map((e: any) => ({
               name: e.key,
               re: e.value,
@@ -783,7 +910,13 @@ const extractorSourceOptions = [
           <!-- Request -->
           <n-tab-pane name="request" tab="请求">
             <div class="flex gap-2 mb-3">
-              <n-select v-model:value="detailRequest.method" :options="methodOptions" class="w-28" size="small" />
+              <n-select
+                :value="detailRequest.method"
+                :options="methodOptions"
+                class="w-28"
+                size="small"
+                @update:value="handleMethodChange(detailRequest!, $event)"
+              />
               <n-input v-model:value="detailRequest.url" size="small" placeholder="https://example.com/api（支持 {{var}}）" />
             </div>
             <div class="flex justify-between items-center mb-1">
