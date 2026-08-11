@@ -12,6 +12,7 @@ interface Template {
   is_public: boolean
   enabled: boolean
   run_count: number
+  last_success_at?: string | null
   created_at: string
   updated_at: string
 }

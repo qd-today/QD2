@@ -40,6 +40,11 @@ const menuOptions = computed<MenuOption[]>(() => {
       icon: renderIcon(SpeedometerOutline),
     },
     {
+      label: () => h(RouterLink, { to: '/tasks' }, { default: () => '任务管理' }),
+      key: '/tasks',
+      icon: renderIcon(TimerOutline),
+    },
+    {
       label: () => h(RouterLink, { to: '/templates' }, { default: () => '模板管理' }),
       key: '/templates',
       icon: renderIcon(DocumentTextOutline),
@@ -48,11 +53,6 @@ const menuOptions = computed<MenuOption[]>(() => {
       label: () => h(RouterLink, { to: '/template-store' }, { default: () => '模板库' }),
       key: '/template-store',
       icon: renderIcon(CloudDownloadOutline),
-    },
-    {
-      label: () => h(RouterLink, { to: '/tasks' }, { default: () => '任务管理' }),
-      key: '/tasks',
-      icon: renderIcon(TimerOutline),
     },
     {
       label: () => h(RouterLink, { to: '/notifications' }, { default: () => '通知渠道' }),

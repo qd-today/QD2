@@ -12,10 +12,13 @@ interface Task {
   variables: Record<string, unknown>
   execution_config: Record<string, unknown>
   group_id?: number | null
-  next_run_at?: string
+  next_run_at?: string | null
   run_count: number
   last_run_at?: string
   last_status?: string
+  success_count: number
+  failed_count: number
+  last_success_at?: string | null
   created_at: string
   updated_at: string
 }

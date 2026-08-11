@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useMessage, useDialog } from 'naive-ui'
+import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '@/stores/task'
 import api from '@/api'
 import TaskRunHistory from '@/components/TaskRunHistory.vue'
@@ -8,6 +9,8 @@ import CookieManager from '@/components/CookieManager.vue'
 
 const message = useMessage()
 const dialog = useDialog()
+const route = useRoute()
+const router = useRouter()
 const taskStore = useTaskStore()
 
 const showDialog = ref(false)
@@ -24,8 +27,23 @@ const cookieTaskId = ref<number | null>(null)
 const templates = ref<any[]>([])
 const groups = ref<any[]>([])
 const selectedGroupId = ref<number | null>(null)
+const selectedTaskIds = ref<number[]>([])
+const collapsedTaskGroups = ref<Record<string, boolean>>({})
 const showGroupDialog = ref(false)
 const newGroupName = ref('')
+const showScheduleDialog = ref(false)
+const scheduleTaskId = ref<number | null>(null)
+const scheduleSaving = ref(false)
+const scheduleForm = reactive({
+  schedule_type: 'interval',
+  interval_seconds: 3600,
+  cron_expression: '',
+  run_time: '00:00',
+})
+const showTaskGroupDialog = ref(false)
+const groupTaskId = ref<number | null>(null)
+const taskGroupValue = ref<number | null>(null)
+const groupSaving = ref(false)
 
 const templateVariables = ref<{ key: string; value: string }[]>([])
 
@@ -52,10 +70,94 @@ const filteredTasks = computed(() => {
   return taskStore.tasks.filter((t: any) => t.group_id === selectedGroupId.value)
 })
 
+const taskSections = computed(() => {
+  const sectionMap = new Map<string, { id: number | null; name: string; tasks: any[] }>()
+  for (const group of groups.value) {
+    sectionMap.set(String(group.id), { id: group.id, name: group.name, tasks: [] })
+  }
+  sectionMap.set('ungrouped', { id: null, name: 'None', tasks: [] })
+  for (const task of filteredTasks.value) {
+    const key = task.group_id ? String(task.group_id) : 'ungrouped'
+    if (!sectionMap.has(key)) sectionMap.set(key, { id: task.group_id || null, name: 'None', tasks: [] })
+    sectionMap.get(key)!.tasks.push(task)
+  }
+  return Array.from(sectionMap.values()).filter((section) => section.tasks.length > 0)
+})
+
+const allTasksSelected = computed(
+  () => filteredTasks.value.length > 0 && filteredTasks.value.every((task: any) => selectedTaskIds.value.includes(task.id)),
+)
+
+function groupKey(id: number | null) {
+  return id === null ? 'ungrouped' : String(id)
+}
+
+function isTaskGroupCollapsed(id: number | null) {
+  return collapsedTaskGroups.value[groupKey(id)] === true
+}
+
+function toggleTaskGroup(id: number | null) {
+  const key = groupKey(id)
+  collapsedTaskGroups.value[key] = !isTaskGroupCollapsed(id)
+}
+
+function toggleTaskSelection(id: number, checked: boolean) {
+  if (checked && !selectedTaskIds.value.includes(id)) selectedTaskIds.value.push(id)
+  if (!checked) selectedTaskIds.value = selectedTaskIds.value.filter((taskId) => taskId !== id)
+}
+
+function toggleAllTaskSelection(checked: boolean) {
+  selectedTaskIds.value = checked ? filteredTasks.value.map((task: any) => task.id) : []
+}
+
+function toggleGroupSelection(tasks: any[], checked: boolean) {
+  const ids = new Set(selectedTaskIds.value)
+  for (const task of tasks) {
+    if (checked) ids.add(task.id)
+    else ids.delete(task.id)
+  }
+  selectedTaskIds.value = Array.from(ids)
+}
+
+function isGroupSelected(tasks: any[]) {
+  return tasks.length > 0 && tasks.every((task) => selectedTaskIds.value.includes(task.id))
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return '从未'
+  const normalized = value.endsWith('Z') || /[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`
+  const date = new Date(normalized)
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString()
+}
+
+function formatScheduleRule(config?: Record<string, unknown>) {
+  const schedule = config || {}
+  const scheduleType = String(schedule.schedule_type || 'interval')
+  if (scheduleType === 'interval') {
+    const seconds = Number(schedule.interval_seconds || 3600)
+    if (seconds % 86400 === 0) return `每 ${seconds / 86400} 天`
+    if (seconds % 3600 === 0) return `每 ${seconds / 3600} 小时`
+    if (seconds % 60 === 0) return `每 ${seconds / 60} 分钟`
+    return `每 ${seconds} 秒`
+  }
+  if (scheduleType === 'cron') return `Cron: ${String(schedule.cron_expression || '-')}`
+  if (scheduleType === 'daily') return `每天 ${String(schedule.run_time || '00:00')}`
+  if (scheduleType === 'once') {
+    const runAt = typeof schedule.run_at === 'string' ? schedule.run_at : null
+    return runAt ? `单次 ${formatDateTime(runAt)}` : '仅手动'
+  }
+  return '仅手动'
+}
+
 onMounted(async () => {
   await taskStore.fetchTasks()
   await fetchTemplates()
   await fetchGroups()
+  const templateId = Number(route.query.template_id)
+  if (route.query.create === '1' && Number.isInteger(templateId) && templateId > 0) {
+    openCreate(templateId)
+    await router.replace('/tasks')
+  }
 })
 
 async function fetchTemplates() {
@@ -76,13 +178,6 @@ async function fetchGroups() {
   }
 }
 
-function getTemplateName(id: number) {
-  return templates.value.find((t) => t.id === id)?.name
-}
-function getGroupName(id?: number | null) {
-  return groups.value.find((g) => g.id === id)?.name
-}
-
 function statusType(status: string): any {
   const m: Record<string, string> = {
     success: 'success',
@@ -94,36 +189,101 @@ function statusType(status: string): any {
   return m[status] || 'default'
 }
 
-function scheduleText(row: any): string {
-  const sc = row.schedule_config || {}
-  if (sc.schedule_type === 'interval') return `每 ${sc.interval_seconds} 秒`
-  if (sc.schedule_type === 'cron') return sc.cron_expression || 'cron'
-  if (sc.schedule_type === 'daily') return `每天 ${sc.run_time}`
-  return '仅手动'
+function statusLabel(status?: string): string {
+  const labels: Record<string, string> = {
+    pending: '等待',
+    running: '运行中',
+    success: '成功',
+    failed: '失败',
+    paused: '停止',
+    disabled: '停止',
+  }
+  return labels[status || ''] || '停止'
 }
+
+const jinjaGlobals = new Set([
+  '_cookies', 'True', 'False', 'none', 'int', 'float', 'bool', 'utf8', 'unicode',
+  'urlencode', 'quote_chinese', 'b2a_hex', 'a2b_hex', 'b2a_uu', 'a2b_uu',
+  'b2a_base64', 'a2b_base64', 'b2a_qp', 'a2b_qp', 'crc_hqx', 'crc32', 'format',
+  'b64decode', 'b64encode', 'to_uuid', 'md5', 'sha1', 'password_hash', 'hash',
+  'aes_encrypt', 'aes_decrypt', 'rsa_encrypt', 'rsa_decrypt', 'timestamp',
+  'date_time', 'strftime', 'is_num', 'add', 'sub', 'multiply', 'divide', 'Faker',
+  'regex_replace', 'regex_escape', 'regex_search', 'regex_findall', 'ternary',
+  'random', 'shuffle', 'mandatory', 'type_debug', 'dict', 'lipsum', 'range',
+])
 
 function extractVars(templateId: number) {
   const tmpl = templates.value.find((t) => t.id === templateId)
-  const vars = new Set<string>()
-  for (const key of Object.keys(tmpl?.variables || {})) vars.add(key)
-  const scan = (s?: string) => {
-    for (const m of (s || '').matchAll(/\{\{\s*(\w+)/g)) {
+  const firstUse = new Map<string, number>()
+  const firstExtract = new Map<string, number>()
+  const scan = (value: unknown, requestIndex: number) => {
+    if (typeof value !== 'string') return
+    for (const m of value.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)/g)) {
       const name = m[1]
-      if (!['timestamp', 'date_time', 'random', 'add', 'sub'].includes(name)) vars.add(name)
+      if (!jinjaGlobals.has(name) && !firstUse.has(name)) firstUse.set(name, requestIndex)
     }
   }
-  const reqs = Array.isArray(tmpl?.template_data)
-    ? tmpl.template_data.map((e: any) => e.request)
-    : tmpl?.template_data?.requests || []
-  for (const req of reqs) {
-    if (!req) continue
-    scan(req.url)
-    for (const h of req.headers || []) scan(h.value)
-    scan(req.postData?.text || req.data)
+
+  const templateData = tmpl?.template_data
+  const entries = Array.isArray(templateData)
+    ? templateData.map((entry: any) => ({
+        request: entry.request || {},
+        rule: entry.rule || entry.request?.rule || {},
+      }))
+    : Array.isArray(templateData?.requests)
+      ? templateData.requests.map((request: any) => ({
+          request,
+          rule: request.rule || {},
+        }))
+      : (templateData?.log?.entries || []).map((entry: any) => ({
+          request: entry.request || {},
+          rule: {
+            ...(entry.rule || {}),
+            extract_variables: entry.extract_variables || entry.rule?.extract_variables || [],
+          },
+        }))
+
+  for (const name of Object.keys(templateData?.extractors || {})) {
+    firstExtract.set(name, 0)
   }
-  templateVariables.value = Array.from(vars).map((key) => ({
+
+  entries.forEach(({ request: req, rule }: any, requestIndex: number) => {
+    if (!req) return
+    scan(req.url, requestIndex)
+    for (const header of req.headers || []) {
+      scan(header.name, requestIndex)
+      scan(header.value, requestIndex)
+    }
+    for (const query of req.queryString || []) {
+      scan(query.name, requestIndex)
+      scan(query.value, requestIndex)
+    }
+    for (const cookie of req.cookies || []) {
+      scan(cookie.name, requestIndex)
+      scan(cookie.value, requestIndex)
+    }
+    scan(req.postData?.text || req.data || req.body, requestIndex)
+
+    const extractedNames = new Set<string>(Object.keys(req.extractors || {}))
+    for (const extractor of rule.extract_variables || req.extract_variables || []) {
+      if (extractor.name) extractedNames.add(extractor.name)
+    }
+    for (const name of extractedNames) {
+      if (!firstExtract.has(name)) firstExtract.set(name, requestIndex)
+    }
+  })
+
+  const candidates = new Set([...Object.keys(tmpl?.variables || {}), ...firstUse.keys()])
+  const requiredVariables = Array.from(candidates).filter((name) => {
+    if (jinjaGlobals.has(name)) return false
+    const extractIndex = firstExtract.get(name)
+    const useIndex = firstUse.get(name)
+    return extractIndex === undefined || (useIndex !== undefined && useIndex <= extractIndex)
+  })
+
+  templateVariables.value = requiredVariables.map((key) => ({
     key,
-    value: tmpl?.variables?.[key] || '',
+    value: String(tmpl?.variables?.[key] ?? ''),
   }))
 }
 
@@ -154,9 +314,17 @@ function resetForm() {
   templateVariables.value = []
 }
 
-function openCreate() {
+function openCreate(templateId?: number) {
   editingId.value = null
   resetForm()
+  if (typeof templateId === 'number') {
+    const selectedTemplate = templates.value.find((template) => template.id === templateId)
+    if (selectedTemplate) {
+      form.template_id = templateId
+      form.name = selectedTemplate.name
+      onTemplateChange(templateId)
+    }
+  }
   showDialog.value = true
 }
 
@@ -190,6 +358,64 @@ function openHistory(row: any) {
 function openCookies(row: any) {
   cookieTaskId.value = row.id
   showCookies.value = true
+}
+
+function openTemplate(row: any) {
+  router.push(`/templates/${row.template_id}`)
+}
+
+function openSchedule(row: any) {
+  const config = row.schedule_config || {}
+  scheduleTaskId.value = row.id
+  scheduleForm.schedule_type = config.schedule_type || 'interval'
+  scheduleForm.interval_seconds = config.interval_seconds || 3600
+  scheduleForm.cron_expression = config.cron_expression || ''
+  scheduleForm.run_time = config.run_time || '00:00'
+  showScheduleDialog.value = true
+}
+
+async function saveSchedule() {
+  if (!scheduleTaskId.value) return
+  const scheduleConfig: Record<string, string | number> = { schedule_type: scheduleForm.schedule_type }
+  if (scheduleForm.schedule_type === 'interval') scheduleConfig.interval_seconds = scheduleForm.interval_seconds
+  if (scheduleForm.schedule_type === 'cron') scheduleConfig.cron_expression = scheduleForm.cron_expression
+  if (scheduleForm.schedule_type === 'daily') scheduleConfig.run_time = scheduleForm.run_time
+  scheduleSaving.value = true
+  try {
+    await taskStore.updateTask(scheduleTaskId.value, { schedule_config: scheduleConfig })
+    showScheduleDialog.value = false
+    message.success('定时设置已保存')
+  } catch (err: any) {
+    message.error(err.response?.data?.detail || '定时设置保存失败')
+  } finally {
+    scheduleSaving.value = false
+  }
+}
+
+function openTaskGroup(row: any) {
+  groupTaskId.value = row.id
+  taskGroupValue.value = row.group_id || null
+  showTaskGroupDialog.value = true
+}
+
+async function saveTaskGroup() {
+  if (!groupTaskId.value) return
+  groupSaving.value = true
+  try {
+    await taskStore.updateTask(groupTaskId.value, { group_id: taskGroupValue.value })
+    showTaskGroupDialog.value = false
+    await fetchGroups()
+    message.success('任务分组已保存')
+  } catch (err: any) {
+    message.error(err.response?.data?.detail || '任务分组保存失败')
+  } finally {
+    groupSaving.value = false
+  }
+}
+
+function handleMore(action: string, row: any) {
+  if (action === 'cookies') openCookies(row)
+  if (action === 'delete') deleteTask(row.id)
 }
 
 async function save() {
@@ -296,7 +522,7 @@ function deleteGroup(id: number) {
   <div>
     <div class="flex justify-between items-center mb-4">
       <h2 class="text-lg font-semibold m-0">任务管理</h2>
-      <n-button type="primary" @click="openCreate">新建任务</n-button>
+      <n-button type="primary" @click="openCreate()">新建任务</n-button>
     </div>
 
     <div v-if="groups.length > 0" class="mb-3 flex flex-wrap gap-2">
@@ -320,49 +546,104 @@ function deleteGroup(id: number) {
         description="暂无任务"
         class="mt-16"
       />
-      <n-table v-else :bordered="false" :single-line="false" size="small">
-        <thead>
-          <tr>
-            <th>任务名称</th>
-            <th>模板</th>
-            <th>分组</th>
-            <th>调度</th>
-            <th>状态</th>
-            <th>次数</th>
-            <th>重试</th>
-            <th class="!text-right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in filteredTasks" :key="row.id">
-            <td class="font-medium">{{ row.name }}</td>
-            <td class="text-gray-400">{{ getTemplateName(row.template_id) || `#${row.template_id}` }}</td>
-            <td>
-              <n-tag v-if="getGroupName(row.group_id)" size="tiny" round>{{ getGroupName(row.group_id) }}</n-tag>
-              <span v-else class="text-gray-300">-</span>
-            </td>
-            <td class="text-xs">{{ scheduleText(row) }}</td>
-            <td>
-              <n-tag :type="statusType(row.last_status || row.status)" size="small" round>
-                {{ row.last_status || row.status }}
-              </n-tag>
-            </td>
-            <td>{{ row.run_count }}</td>
-            <td class="text-xs text-gray-400">
-              {{ row.execution_config?.retry_count ? `×${row.execution_config.retry_count}` : '-' }}
-            </td>
-            <td class="!text-right whitespace-nowrap">
-              <n-button size="tiny" type="success" quaternary :loading="runningId === row.id" @click="runTask(row.id)">
-                执行
-              </n-button>
-              <n-button size="tiny" quaternary @click="openHistory(row)">历史</n-button>
-              <n-button size="tiny" quaternary @click="openCookies(row)">Cookie</n-button>
-              <n-button size="tiny" quaternary @click="openEdit(row)">编辑</n-button>
-              <n-button size="tiny" quaternary type="error" @click="deleteTask(row.id)">删除</n-button>
-            </td>
-          </tr>
-        </tbody>
-      </n-table>
+      <div v-else class="overflow-x-auto">
+        <n-table :bordered="false" :single-line="false" size="small" class="min-w-[63rem]">
+          <thead>
+            <tr>
+              <th class="w-10">
+                <n-checkbox
+                  :checked="allTasksSelected"
+                  :indeterminate="selectedTaskIds.length > 0 && !allTasksSelected"
+                  aria-label="选择全部任务"
+                  @update:checked="toggleAllTaskSelection"
+                />
+              </th>
+              <th>任务名称</th>
+              <th class="w-20">成/败</th>
+              <th class="w-32">定时规则</th>
+              <th class="w-36">上次成功</th>
+              <th class="w-20">状态</th>
+              <th class="w-36">下次运行</th>
+              <th class="!text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="section in taskSections" :key="groupKey(section.id)">
+              <tr class="bg-sky-50 dark:bg-sky-950/40">
+                <td colspan="8" class="!py-2">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="flex items-center gap-2 font-semibold">
+                      <n-checkbox
+                        :checked="isGroupSelected(section.tasks)"
+                        :indeterminate="section.tasks.some((task) => selectedTaskIds.includes(task.id)) && !isGroupSelected(section.tasks)"
+                        :aria-label="`选择${section.name}分组`"
+                        @update:checked="toggleGroupSelection(section.tasks, $event)"
+                      />
+                      <span>{{ section.name }} 分组</span>
+                    </div>
+                    <n-button
+                      size="tiny"
+                      quaternary
+                      :aria-label="`${isTaskGroupCollapsed(section.id) ? '展开' : '收起'}${section.name}分组`"
+                      @click="toggleTaskGroup(section.id)"
+                    >
+                      {{ isTaskGroupCollapsed(section.id) ? '展开' : '收起' }}
+                    </n-button>
+                  </div>
+                </td>
+              </tr>
+              <template v-if="!isTaskGroupCollapsed(section.id)">
+              <tr v-for="row in section.tasks" :key="row.id">
+                <td>
+                  <n-checkbox
+                    :checked="selectedTaskIds.includes(row.id)"
+                    :aria-label="`选择任务 ${row.name}`"
+                    @update:checked="toggleTaskSelection(row.id, $event)"
+                  />
+                </td>
+                <td class="font-medium">
+                  <n-tag v-if="row.status === 'disabled'" size="tiny" type="warning" class="mr-1">禁用</n-tag>
+                  <span :title="row.name">{{ row.name }}</span>
+                </td>
+                <td class="whitespace-nowrap">
+                  <span class="text-green-600 dark:text-green-400">{{ row.success_count ?? 0 }}</span>
+                  <span class="text-gray-400"> / </span>
+                  <span class="text-red-600 dark:text-red-400">{{ row.failed_count ?? 0 }}</span>
+                </td>
+                <td class="text-xs whitespace-nowrap" :title="formatScheduleRule(row.schedule_config)">
+                  {{ formatScheduleRule(row.schedule_config) }}
+                </td>
+                <td class="text-xs whitespace-nowrap">{{ formatDateTime(row.last_success_at) }}</td>
+                <td>
+                  <n-tag :type="statusType(row.status)" size="small" round>{{ statusLabel(row.status) }}</n-tag>
+                </td>
+                <td class="text-xs whitespace-nowrap">{{ formatDateTime(row.next_run_at) }}</td>
+                <td class="!text-right whitespace-nowrap">
+                  <n-button size="tiny" quaternary @click="openEdit(row)">修改</n-button>
+                  <n-button size="tiny" type="success" quaternary :loading="runningId === row.id" @click="runTask(row.id)">
+                    执行
+                  </n-button>
+                  <n-button size="tiny" quaternary @click="openTemplate(row)">模板</n-button>
+                  <n-button size="tiny" quaternary @click="openSchedule(row)">定时</n-button>
+                  <n-button size="tiny" quaternary @click="openHistory(row)">日志</n-button>
+                  <n-button size="tiny" quaternary @click="openTaskGroup(row)">分组</n-button>
+                  <n-dropdown
+                    trigger="click"
+                    :options="[
+                      { label: 'Cookie', key: 'cookies' },
+                      { label: '删除', key: 'delete' },
+                    ]"
+                    @select="(key: string) => handleMore(key, row)"
+                  >
+                    <n-button size="tiny" quaternary title="更多操作" aria-label="更多操作">⋯</n-button>
+                  </n-dropdown>
+                </td>
+              </tr>
+              </template>
+            </template>
+          </tbody>
+        </n-table>
+      </div>
     </n-spin>
 
     <!-- Create/Edit -->
@@ -455,6 +736,71 @@ function deleteGroup(id: number) {
         <div class="flex justify-end gap-2">
           <n-button @click="showDialog = false">取消</n-button>
           <n-button type="primary" :loading="saving" @click="save">保存</n-button>
+        </div>
+      </template>
+    </n-modal>
+
+    <!-- Task schedule -->
+    <n-modal
+      v-model:show="showScheduleDialog"
+      preset="card"
+      title="定时设置"
+      class="max-w-md"
+      :style="{ width: '92vw' }"
+    >
+      <n-form label-placement="left" label-width="90">
+        <n-form-item label="调度类型">
+          <n-select
+            v-model:value="scheduleForm.schedule_type"
+            :options="[
+              { label: '固定间隔', value: 'interval' },
+              { label: 'Cron 表达式', value: 'cron' },
+              { label: '每天执行', value: 'daily' },
+              { label: '仅手动', value: 'once' },
+            ]"
+          />
+        </n-form-item>
+        <n-form-item v-if="scheduleForm.schedule_type === 'interval'" label="间隔(秒)">
+          <n-input-number v-model:value="scheduleForm.interval_seconds" :min="10" :max="86400" class="w-full" />
+        </n-form-item>
+        <n-form-item v-if="scheduleForm.schedule_type === 'cron'" label="Cron">
+          <n-input v-model:value="scheduleForm.cron_expression" placeholder="0 */6 * * *" />
+        </n-form-item>
+        <n-form-item v-if="scheduleForm.schedule_type === 'daily'" label="执行时间">
+          <n-time-picker
+            v-model:formatted-value="scheduleForm.run_time"
+            format="HH:mm"
+            value-format="HH:mm"
+            class="w-full"
+          />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <n-button @click="showScheduleDialog = false">取消</n-button>
+          <n-button type="primary" :loading="scheduleSaving" @click="saveSchedule">保存</n-button>
+        </div>
+      </template>
+    </n-modal>
+
+    <!-- Task group -->
+    <n-modal
+      v-model:show="showTaskGroupDialog"
+      preset="card"
+      title="任务分组"
+      class="max-w-md"
+      :style="{ width: '92vw' }"
+    >
+      <n-select
+        v-model:value="taskGroupValue"
+        :options="groups.map((group) => ({ label: group.name, value: group.id }))"
+        placeholder="选择分组"
+        clearable
+      />
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <n-button @click="showTaskGroupDialog = false">取消</n-button>
+          <n-button type="primary" :loading="groupSaving" @click="saveTaskGroup">保存</n-button>
         </div>
       </template>
     </n-modal>

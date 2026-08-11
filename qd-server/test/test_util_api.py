@@ -3,14 +3,21 @@
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-
-from qd_server.api import util
+from qd_server.api import test_request, util
+from qd_server.middleware.auth import get_current_user
+from qd_server.models.user import User
 
 
 @pytest.fixture
 def client():
     app = FastAPI()
     app.include_router(util.router, prefix="/util")
+    app.include_router(test_request.router, prefix="/api/test")
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id=1,
+        username="util-test",
+        hashed_password="x",
+    )
     return TestClient(app)
 
 
@@ -65,3 +72,37 @@ def test_public_input_limits_are_enforced():
     with pytest.raises(HTTPException) as error:
         util._regex_findall("x", "a" * (util.MAX_PATTERN_LENGTH + 1))
     assert error.value.status_code == 413
+
+
+def test_request_api_supports_qd_internal_scheme(client):
+    response = client.post(
+        "/api/test/test",
+        json={"method": "GET", "url": "api://util/delay/0"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 200
+    assert response.json()["error"] is None
+    assert response.json()["body"] == "delay 0.0 second."
+
+
+def test_request_api_reports_unsupported_internal_service(client):
+    response = client.post(
+        "/api/test/test",
+        json={"method": "GET", "url": "api://admin/users"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 0
+    assert "Unsupported api:// service" in response.json()["error"]
+
+
+def test_request_api_reports_unsupported_util_path(client):
+    response = client.post(
+        "/api/test/test",
+        json={"method": "GET", "url": "api://util/not-migrated"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 0
+    assert "Unsupported api://util path" in response.json()["error"]

@@ -5,12 +5,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
-from sqlmodel import col, select
+from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from qd_server.middleware.auth import get_current_user, get_session
+from qd_server.models.task import Task, TaskRun
 from qd_server.models.template import Template
-from qd_server.models.task import Task
 from qd_server.models.user import User
 
 router = APIRouter()
@@ -49,11 +49,32 @@ class TemplateResponse(BaseModel):
     run_count: int
     created_at: datetime
     updated_at: datetime
+    last_success_at: Optional[datetime] = None
 
 
 class TemplateListResponse(BaseModel):
     items: list[TemplateResponse]
     total: int
+
+
+async def _get_template_last_success(
+    template_ids: list[int], user_id: int, session: AsyncSession
+) -> dict[int, datetime | None]:
+    """Return the latest successful run time for each owned template."""
+    if not template_ids:
+        return {}
+    result = await session.execute(
+        select(Task.template_id, func.max(func.coalesce(TaskRun.finished_at, TaskRun.started_at)))
+        .join(TaskRun, TaskRun.task_id == Task.id)
+        .where(
+            Task.template_id.in_(template_ids),
+            Task.user_id == user_id,
+            TaskRun.user_id == user_id,
+            TaskRun.status == "success",
+        )
+        .group_by(Task.template_id)
+    )
+    return {template_id: last_success_at for template_id, last_success_at in result.all()}
 
 
 # --- Routes ---
@@ -77,6 +98,9 @@ async def list_templates(
 
     result = await session.execute(query)
     templates = result.scalars().all()
+    last_success = await _get_template_last_success(
+        [template.id for template in templates], current_user.id, session
+    )
 
     # Get total count
     count_query = select(Template).where(Template.user_id == current_user.id)
@@ -99,6 +123,7 @@ async def list_templates(
                 run_count=t.run_count,
                 created_at=t.created_at,
                 updated_at=t.updated_at,
+                last_success_at=last_success.get(t.id),
             )
             for t in templates
         ],
@@ -141,6 +166,7 @@ async def create_template(
         run_count=template.run_count,
         created_at=template.created_at,
         updated_at=template.updated_at,
+        last_success_at=None,
     )
 
 
@@ -162,6 +188,7 @@ async def get_template(
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
 
+    last_success_at = (await _get_template_last_success([template.id], current_user.id, session)).get(template.id)
     return TemplateResponse(
         id=template.id,
         name=template.name,
@@ -174,6 +201,7 @@ async def get_template(
         run_count=template.run_count,
         created_at=template.created_at,
         updated_at=template.updated_at,
+        last_success_at=last_success_at,
     )
 
 
@@ -233,6 +261,7 @@ async def update_template(
         run_count=template.run_count,
         created_at=template.created_at,
         updated_at=template.updated_at,
+        last_success_at=(await _get_template_last_success([template.id], current_user.id, session)).get(template.id),
     )
 
 
@@ -417,4 +446,5 @@ async def import_template(
         run_count=template.run_count,
         created_at=template.created_at,
         updated_at=template.updated_at,
+        last_success_at=None,
     )

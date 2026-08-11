@@ -1,13 +1,15 @@
 """Request testing and cURL parsing API routes."""
 
-import shlex
 import json
+import shlex
 import time
-from typing import Literal, Optional
+from typing import Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from qd_core.client.fetcher import resolve_api_url
+
 from qd_server.middleware.auth import get_current_user
 from qd_server.models.user import User
 
@@ -21,7 +23,7 @@ class TestRequest(BaseModel):
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] = "GET"
     url: str = Field(min_length=1, max_length=4096)
     headers: dict[str, str] = Field(default_factory=dict)
-    body: Optional[str] = Field(default=None, max_length=1024 * 1024)
+    body: str | None = Field(default=None, max_length=1024 * 1024)
     body_type: Literal["none", "json", "form", "text"] = "none"
     timeout: int = Field(default=30, ge=1, le=120)
     verify_tls: bool = True
@@ -33,7 +35,7 @@ class TestResponse(BaseModel):
     headers: dict[str, str]
     body: str
     elapsed_ms: float
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class CurlParseRequest(BaseModel):
@@ -45,13 +47,14 @@ class ParsedRequest(BaseModel):
     """Parsed request from cURL or HAR."""
     method: str
     url: str
-    headers: dict[str, str] = {}
-    body: Optional[str] = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
     body_type: str = "none"
-    name: Optional[str] = None  # Request name/comment
-    success_asserts: Optional[list[dict]] = None  # QD v1 success conditions
-    failed_asserts: Optional[list[dict]] = None  # QD v1 failed conditions
-    extract_variables: Optional[list[dict]] = None  # QD v1 extractors
+    name: str | None = None  # Request name/comment
+    success_asserts: list[dict] | None = None  # QD v1 success conditions
+    failed_asserts: list[dict] | None = None  # QD v1 failed conditions
+    extract_variables: list[dict] | None = None  # QD v1 extractors
+    checked: bool = True
 
 
 class HarImportRequest(BaseModel):
@@ -64,7 +67,8 @@ class HarImportRequest(BaseModel):
 @router.post("/test", response_model=TestResponse)
 async def test_request(
     request: TestRequest,
-    current_user: User = Depends(get_current_user),
+    http_request: Request,
+    current_user: User = Depends(get_current_user),  # noqa: B008 - FastAPI dependency
 ):
     """Send a test HTTP request and return the response."""
     try:
@@ -81,15 +85,23 @@ async def test_request(
             elif request.body_type == "text":
                 content = request.body.encode()
 
+        is_internal_api = request.url.lower().startswith("api://")
+        resolved_url = resolve_api_url(request.url, str(http_request.base_url))
+        client_options = {
+            "timeout": request.timeout,
+            "follow_redirects": True,
+            "verify": request.verify_tls,
+        }
+        if is_internal_api:
+            client_options["transport"] = httpx.ASGITransport(app=http_request.app)
+
         started = time.perf_counter()
         async with httpx.AsyncClient(
-            timeout=request.timeout,
-            follow_redirects=True,
-            verify=request.verify_tls,
+            **client_options,
         ) as client:
             async with client.stream(
                 method=request.method.upper(),
-                url=request.url,
+                url=resolved_url,
                 headers=headers,
                 content=content,
             ) as response:
@@ -138,76 +150,120 @@ async def test_request(
 @router.post("/parse-curl", response_model=ParsedRequest)
 async def parse_curl(
     request: CurlParseRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008 - FastAPI dependency
 ):
     """Parse a cURL command into a structured request."""
     try:
-        # Clean up the command
-        cmd = request.curl_command.strip()
-        if cmd.startswith("curl "):
-            cmd = cmd[5:]
-
-        # Handle line continuations
-        cmd = cmd.replace("\\\n", " ").replace("\\\r\n", " ")
-
-        # Parse with shlex
-        parts = shlex.split(cmd)
-
-        method = "GET"
-        url = ""
-        headers = {}
-        body = None
-        body_type = "none"
-
-        i = 0
-        while i < len(parts):
-            part = parts[i]
-
-            if part in ("-X", "--request") and i + 1 < len(parts):
-                method = parts[i + 1].upper()
-                i += 2
-            elif part in ("-H", "--header") and i + 1 < len(parts):
-                header_str = parts[i + 1]
-                if ":" in header_str:
-                    key, value = header_str.split(":", 1)
-                    headers[key.strip()] = value.strip()
-                i += 2
-            elif part in ("-d", "--data", "--data-raw", "--data-binary") and i + 1 < len(parts):
-                body = parts[i + 1]
-                body_type = "json"
-                # Try to detect JSON
-                try:
-                    json.loads(body)
-                except (json.JSONDecodeError, TypeError):
-                    body_type = "form" if "=" in body and "&" in body else "text"
-                if method == "GET":
-                    method = "POST"
-                i += 2
-            elif part == "--compressed":
-                headers["Accept-Encoding"] = "gzip, deflate, br"
-                i += 1
-            elif not part.startswith("-") and not url:
-                url = part
-                i += 1
-            else:
-                i += 1
-
-        return ParsedRequest(
-            method=method,
-            url=url,
-            headers=headers,
-            body=body,
-            body_type=body_type,
-        )
+        return _parse_curl_command(request.curl_command)
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse cURL: {e}") from e
 
 
+def _parse_curl_command(curl_command: str) -> ParsedRequest:
+    """Parse common cURL request flags without executing the command."""
+    cmd = curl_command.strip()
+    lowered = cmd.lower()
+    if lowered.startswith("curl.exe "):
+        cmd = cmd[9:]
+    elif lowered.startswith("curl "):
+        cmd = cmd[5:]
+
+    # Browser exports use backslashes, cmd.exe uses carets, and PowerShell uses
+    # backticks for multiline commands.
+    for continuation in ("\\\r\n", "\\\n", "^\r\n", "^\n", "`\r\n", "`\n"):
+        cmd = cmd.replace(continuation, " ")
+
+    parts = shlex.split(cmd)
+    method = "GET"
+    url = ""
+    headers: dict[str, str] = {}
+    body = None
+    body_type = "none"
+
+    def set_header(name: str, value: str) -> None:
+        existing_name = next((key for key in headers if key.lower() == name.lower()), name)
+        headers[existing_name] = value
+
+    def append_cookie(value: str) -> None:
+        cookie_name = next((key for key in headers if key.lower() == "cookie"), "Cookie")
+        existing = headers.get(cookie_name)
+        headers[cookie_name] = f"{existing}; {value}" if existing else value
+
+    def set_body(value: str) -> None:
+        nonlocal body, body_type, method
+        body = value
+        body_type = "json"
+        try:
+            json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            body_type = "form" if "=" in body else "text"
+        if method == "GET":
+            method = "POST"
+
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+
+        if part in ("-X", "--request") and i + 1 < len(parts):
+            method = parts[i + 1].upper()
+            i += 2
+        elif part.startswith("--request="):
+            method = part.split("=", 1)[1].upper()
+            i += 1
+        elif part in ("-H", "--header") and i + 1 < len(parts):
+            header_str = parts[i + 1]
+            if ":" in header_str:
+                key, value = header_str.split(":", 1)
+                set_header(key.strip(), value.strip())
+            i += 2
+        elif part.startswith("--header="):
+            header_str = part.split("=", 1)[1]
+            if ":" in header_str:
+                key, value = header_str.split(":", 1)
+                set_header(key.strip(), value.strip())
+            i += 1
+        elif part in ("-b", "--cookie") and i + 1 < len(parts):
+            append_cookie(parts[i + 1])
+            i += 2
+        elif part.startswith("--cookie="):
+            append_cookie(part.split("=", 1)[1])
+            i += 1
+        elif part.startswith("-b") and len(part) > 2:
+            append_cookie(part[2:])
+            i += 1
+        elif part in ("-c", "--cookie-jar") and i + 1 < len(parts):
+            i += 2
+        elif part.startswith("--cookie-jar="):
+            i += 1
+        elif part in ("-d", "--data", "--data-raw", "--data-binary") and i + 1 < len(parts):
+            set_body(parts[i + 1])
+            i += 2
+        elif any(part.startswith(f"{flag}=") for flag in ("--data", "--data-raw", "--data-binary")):
+            set_body(part.split("=", 1)[1])
+            i += 1
+        elif part in ("--url",) and i + 1 < len(parts):
+            url = parts[i + 1]
+            i += 2
+        elif part.startswith("--url="):
+            url = part.split("=", 1)[1]
+            i += 1
+        elif part == "--compressed":
+            set_header("Accept-Encoding", "gzip, deflate, br")
+            i += 1
+        elif not part.startswith("-") and not url:
+            url = part
+            i += 1
+        else:
+            i += 1
+
+    return ParsedRequest(method=method, url=url, headers=headers, body=body, body_type=body_type)
+
+
 @router.post("/parse-har", response_model=list[ParsedRequest])
 async def parse_har(
     request: HarImportRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008 - FastAPI dependency
 ):
     """Parse a HAR file and extract all requests.
 
@@ -277,6 +333,7 @@ def _parse_qd_v1(data: list) -> list[ParsedRequest]:
             success_asserts=success_asserts if success_asserts else None,
             failed_asserts=failed_asserts if failed_asserts else None,
             extract_variables=extract_variables if extract_variables else None,
+            checked=item.get("checked", req.get("checked", True)),
         ))
 
     return parsed
@@ -315,6 +372,7 @@ def _parse_standard_har(entries: list) -> list[ParsedRequest]:
             headers=headers,
             body=body,
             body_type=body_type,
+            checked=entry.get("checked", har_req.get("checked", True)),
         ))
 
     return parsed

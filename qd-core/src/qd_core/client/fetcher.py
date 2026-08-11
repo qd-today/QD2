@@ -4,7 +4,9 @@ Async HTTP client that executes HAR template requests with QD v1 compatible
 Jinja2 rendering, success/failed asserts, and variable extraction.
 """
 
+import re
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -16,6 +18,36 @@ from qd_core.schemas.har import HARRequest, HARTemplate
 from qd_core.utils.log import Log
 
 logger = Log("QD.Core.Fetcher").getlogger()
+
+SUPPORTED_UTIL_PATHS = {
+    "/timestamp",
+    "/unicode",
+    "/gb2312",
+    "/urldecode",
+    "/regex",
+    "/string/replace",
+    "/rsa",
+}
+
+
+def resolve_api_url(url: str, api_base_url: str | None) -> str:
+    """Resolve the QD v1 ``api://util/*`` scheme to the local utility API."""
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() != "api":
+        return url
+    if parsed.netloc.lower() != "util":
+        raise ValueError(f"Unsupported api:// service: {parsed.netloc or '(empty)'}")
+    if not api_base_url:
+        raise ValueError("api:// URL requires a configured QD API base URL")
+
+    util_path = parsed.path or ""
+    is_delay_path = util_path == "/delay" or re.fullmatch(r"/delay/[^/]+", util_path)
+    if util_path not in SUPPORTED_UTIL_PATHS and not is_delay_path:
+        raise ValueError(f"Unsupported api://util path: {util_path or '/'}")
+
+    base = urlsplit(api_base_url.rstrip("/"))
+    path = f"/util{util_path}"
+    return urlunsplit((base.scheme, base.netloc, path, parsed.query, ""))
 
 
 class QDFetcher:
@@ -33,11 +65,15 @@ class QDFetcher:
         settings: QDCoreSettings | None = None,
         proxy: str | None = None,
         cookie_session: CookieSession | None = None,
+        api_base_url: str | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.settings = settings or QDCoreSettings()
         self.variables: dict[str, Any] = {}
         self.session = cookie_session or CookieSession()
         self.proxy = proxy
+        self.api_base_url = api_base_url
+        self.transport = transport
 
     async def execute_template(self, template: HARTemplate) -> list[dict[str, Any]]:
         """Execute all requests in a template sequentially.
@@ -61,9 +97,14 @@ class QDFetcher:
         )
         if self.proxy:
             client_kwargs["proxy"] = self.proxy
+        if self.transport:
+            client_kwargs["transport"] = self.transport
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             for i, request in enumerate(template.requests):
+                if not request.checked:
+                    logger.info("Skipping unchecked request %d/%d", i + 1, len(template.requests))
+                    continue
                 logger.info(
                     "Executing request %d/%d: %s %s", i + 1, len(template.requests), request.method, request.url
                 )
@@ -107,7 +148,10 @@ class QDFetcher:
         cookies_view = self.session
 
         # Render request pieces with Jinja2 (QD v1 compatible)
-        url = render_string(request.url, self.variables, cookies_view)
+        url = resolve_api_url(
+            render_string(request.url, self.variables, cookies_view),
+            self.api_base_url,
+        )
 
         headers = {}
         for h in request.headers:
@@ -150,10 +194,22 @@ class QDFetcher:
             extracted_variables=rule_extracted,
         )
 
-        # Legacy extractors (QD2 early format)
-        legacy_extracted = self._extract_variables(response, request.extractors, global_extractors)
+        # Legacy extractors (QD2 early format). A QD v1 rule is authoritative
+        # when both formats declare the same variable (older editor versions
+        # persisted every extractor in both places).
+        rule_variable_names = (
+            {extractor.name for extractor in request.rule.extract_variables}
+            if request.rule
+            else set()
+        )
+        legacy_extracted = self._extract_variables(
+            response,
+            request.extractors,
+            global_extractors,
+            excluded_names=rule_variable_names,
+        )
         self.variables.update(legacy_extracted)
-        extracted = {**rule_extracted, **legacy_extracted}
+        extracted = {**legacy_extracted, **rule_extracted}
 
         return {
             "status": "success" if success else "failed",
@@ -173,12 +229,15 @@ class QDFetcher:
         response: httpx.Response,
         request_extractors: dict[str, str],
         global_extractors: dict[str, str],
+        excluded_names: set[str] | None = None,
     ) -> dict[str, Any]:
         """Extract variables from response using legacy extractors."""
         extracted = {}
         all_extractors = {**global_extractors, **request_extractors}
 
         for var_name, extractor_expr in all_extractors.items():
+            if excluded_names and var_name in excluded_names:
+                continue
             try:
                 value = self._resolve_extractor(response, extractor_expr)
                 extracted[var_name] = value
@@ -190,6 +249,13 @@ class QDFetcher:
 
     def _resolve_extractor(self, response: httpx.Response, expression: str) -> Any:
         """Resolve an extractor expression against a response."""
+        # Regex extractor: regex:pattern
+        if expression.startswith("regex:"):
+            match = re.search(expression[6:], response.text)
+            if match is None:
+                return None
+            return match.group(1) if match.groups() else match.group(0)
+
         # Header extractor: header:Header-Name
         if expression.startswith("header:"):
             header_name = expression[7:]
@@ -210,8 +276,6 @@ class QDFetcher:
 
     def _resolve_json_path(self, data: Any, path: str) -> Any:
         """Resolve a JSON path expression like ["key"]["subkey"][0]."""
-        import re
-
         segments = re.findall(r'\["([^"]+)"\]|\[(\d+)\]', path)
 
         current = data

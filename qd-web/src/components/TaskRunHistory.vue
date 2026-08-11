@@ -11,11 +11,13 @@ const message = useMessage()
 const loading = ref(false)
 const runs = ref<any[]>([])
 const stats = ref({ total: 0, success: 0, failed: 0, other: 0 })
-const showDetail = ref(false)
-const selectedRun = ref<any>(null)
 
 function formatTime(iso?: string) {
   return iso ? new Date(iso + 'Z').toLocaleString() : '-'
+}
+
+function runLog(row: any): string {
+  return row.response_summary || row.error_message || '-'
 }
 
 async function fetchRuns() {
@@ -66,8 +68,8 @@ watch(
   <n-modal
     :show="visible"
     preset="card"
-    title="执行历史"
-    class="max-w-3xl"
+    title="任务执行日志"
+    class="max-w-5xl"
     :style="{ width: '92vw' }"
     @update:show="emit('close')"
   >
@@ -82,77 +84,33 @@ watch(
     </div>
     <n-spin :show="loading">
       <n-empty v-if="runs.length === 0 && !loading" description="暂无执行记录" />
-      <n-table v-else size="small" :bordered="false">
-        <thead>
-          <tr>
-            <th>状态</th>
-            <th>耗时</th>
-            <th>开始时间</th>
-            <th>错误信息</th>
-            <th class="!text-right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in runs" :key="row.id">
-            <td>
-              <n-tag :type="row.status === 'success' ? 'success' : 'error'" size="small" round>
-                {{ row.status === 'success' ? '成功' : '失败' }}
-              </n-tag>
-            </td>
-            <td>{{ row.duration_seconds ? row.duration_seconds.toFixed(1) + 's' : '-' }}</td>
-            <td class="text-xs">{{ formatTime(row.started_at) }}</td>
-            <td class="text-xs text-red-400 max-w-64 truncate" :title="row.error_message">
-              {{ row.error_message || '-' }}
-            </td>
-            <td class="!text-right">
-              <n-button size="tiny" quaternary @click="((selectedRun = row), (showDetail = true))">
-                详情
-              </n-button>
-            </td>
-          </tr>
-        </tbody>
-      </n-table>
+      <div v-else class="overflow-x-auto">
+        <n-table size="small" :bordered="true" :single-line="false" class="min-w-3xl table-fixed">
+          <thead>
+            <tr>
+              <th class="w-48">时间</th>
+              <th class="w-24">状态</th>
+              <th>日志</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in runs" :key="row.id">
+              <td class="text-xs whitespace-nowrap">{{ formatTime(row.started_at) }}</td>
+              <td>
+                <n-tag :type="row.status === 'success' ? 'success' : 'error'" size="small" round>
+                  {{ row.status === 'success' ? '成功' : '失败' }}
+                </n-tag>
+              </td>
+              <td>
+                <pre
+                  class="m-0 text-xs leading-5 whitespace-pre-wrap break-words font-mono text-gray-800 dark:text-gray-100"
+                  :class="row.status === 'success' ? '' : 'text-red-600 dark:text-red-400'"
+                >{{ runLog(row) }}</pre>
+              </td>
+            </tr>
+          </tbody>
+        </n-table>
+      </div>
     </n-spin>
-
-    <n-modal
-      v-model:show="showDetail"
-      preset="card"
-      title="执行详情"
-      class="max-w-2xl"
-      :style="{ width: '92vw' }"
-    >
-      <n-descriptions :column="2" bordered size="small">
-        <n-descriptions-item label="状态">
-          <n-tag :type="selectedRun?.status === 'success' ? 'success' : 'error'" size="small">
-            {{ selectedRun?.status }}
-          </n-tag>
-        </n-descriptions-item>
-        <n-descriptions-item label="耗时">
-          {{ selectedRun?.duration_seconds?.toFixed(2) }}s
-        </n-descriptions-item>
-        <n-descriptions-item label="开始时间">
-          {{ formatTime(selectedRun?.started_at) }}
-        </n-descriptions-item>
-        <n-descriptions-item label="结束时间">
-          {{ formatTime(selectedRun?.finished_at) }}
-        </n-descriptions-item>
-      </n-descriptions>
-
-      <div v-if="selectedRun?.error_message" class="mt-4">
-        <div class="text-sm font-medium mb-1">错误信息</div>
-        <pre
-          class="bg-red-50 dark:bg-red-950 text-red-500 p-3 rounded text-xs whitespace-pre-wrap break-all max-h-64 overflow-auto"
-          >{{ selectedRun.error_message }}</pre
-        >
-      </div>
-
-      <div v-if="selectedRun?.response_summary" class="mt-4">
-        <div class="text-sm font-medium mb-1">任务日志 (__log__)</div>
-        <pre
-          class="bg-gray-50 text-gray-800 dark:bg-gray-800 dark:text-gray-100 p-3 rounded text-xs whitespace-pre-wrap break-all max-h-64 overflow-auto"
-          >{{ selectedRun.response_summary }}</pre
-        >
-      </div>
-    </n-modal>
   </n-modal>
 </template>

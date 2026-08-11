@@ -94,6 +94,7 @@ class HARParser:
                 continue
 
             req_data = dict(req_src)
+            req_data["checked"] = entry.get("checked", req_data.get("checked", True))
             # QD v1 stores body as 'data' + 'mimeType' rather than postData
             body_text = req_data.pop("data", None)
             mime_type = req_data.pop("mimeType", None)
@@ -132,8 +133,8 @@ class HARParser:
 
         Supports original QD HAR exports: entry-level ``success_asserts`` /
         ``failed_asserts`` / ``extract_variables`` (or nested ``rule`` blocks)
-        are mapped onto each request's ``rule`` field, and unchecked entries
-        (``checked: false``) are skipped.
+        are mapped onto each request's ``rule`` field. The original
+        ``checked`` state is preserved so editors can re-enable requests.
 
         Args:
             log: The 'log' section of a HAR file.
@@ -148,12 +149,12 @@ class HARParser:
         requests = []
 
         for entry in entries:
-            har_request = entry.get("request", {})
+            har_request = dict(entry.get("request", {}))
             if not har_request:
                 continue
-            # QD v1 export marks entries the user disabled with checked=false
-            if entry.get("checked") is False:
-                continue
+            har_request["checked"] = entry.get(
+                "checked", har_request.get("checked", True)
+            )
 
             request = HARRequest(**har_request)
 

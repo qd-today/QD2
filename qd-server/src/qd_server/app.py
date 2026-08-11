@@ -27,8 +27,13 @@ async def lifespan(app: FastAPI):
     # Initialize database tables
     from sqlmodel import SQLModel
 
+    from qd_server.schema_migrations import upgrade_database_schema
+
     async with settings.db.engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        applied_migrations = await conn.run_sync(upgrade_database_schema)
+    if applied_migrations:
+        logger.info("Applied database schema upgrades: %s", ", ".join(applied_migrations))
 
     # Start scheduler
     from qd_server.services.scheduler import scheduler

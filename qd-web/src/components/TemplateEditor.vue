@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
 import { useMessage } from 'naive-ui'
+import {
+  AddOutline,
+  ArrowDownOutline,
+  ArrowUpOutline,
+  ClipboardOutline,
+  CopyOutline,
+} from '@vicons/ionicons5'
 import api from '@/api'
 
 interface HARHeader {
@@ -13,9 +20,16 @@ interface RequestCondition {
   value: string
   outcome: string
 }
+interface ExtractorRow {
+  key: string
+  value: string
+  source: 'content' | 'status' | 'header'
+  headerName?: string
+}
 interface HARRequestData {
   method: string
   url: string
+  checked: boolean
   headers: HARHeader[]
   extractors: Record<string, string>
   _bodyType: string
@@ -24,9 +38,10 @@ interface HARRequestData {
   _testing: boolean
   _lastResponse: any
   _comment: string
-  _selected: boolean
   _cookies: string
   _conditionResults: any[]
+  _extractorList: ExtractorRow[]
+  _legacyExtractors: Record<string, string>
 }
 
 const message = useMessage()
@@ -36,7 +51,11 @@ const rawTplData = props.initialData?.template_data
 const initialRequests =
   props.initialData?.requests ||
   (Array.isArray(rawTplData)
-    ? rawTplData.map((e: any) => ({ ...(e.request || {}), ...ruleToLegacy(e.rule) }))
+    ? rawTplData.map((e: any) => ({
+        ...(e.request || {}),
+        checked: e.checked ?? e.request?.checked ?? true,
+        ...ruleToLegacy(e.rule),
+      }))
     : rawTplData?.requests) ||
   []
 
@@ -59,46 +78,73 @@ const template = reactive({
 })
 
 function parseRequestData(r: any): HARRequestData {
+  const rule = r.rule || r
+  const conditions: RequestCondition[] = []
+  for (const assertion of rule.success_asserts || []) {
+    conditions.push({
+      type: assertion.from === 'status' ? 'status_code' : 'body_contains',
+      operator: 'matches',
+      value: assertion.re || '',
+      outcome: 'success',
+    })
+  }
+  for (const assertion of rule.failed_asserts || []) {
+    conditions.push({
+      type: assertion.from === 'status' ? 'status_code' : 'body_contains',
+      operator: 'matches',
+      value: assertion.re || '',
+      outcome: 'failure',
+    })
+  }
+  if (conditions.length === 0) conditions.push(...(r._conditions || []))
+
+  const extractorList: ExtractorRow[] = []
+  const declaredNames = new Set<string>()
+  for (const extractor of rule.extract_variables || []) {
+    if (!extractor.name) continue
+    const from = extractor.from || 'content'
+    extractorList.push({
+      key: extractor.name,
+      value: extractor.re || '',
+      source: from.startsWith('header') ? 'header' : from === 'status' ? 'status' : 'content',
+      headerName: from.startsWith('header-') ? from.slice(7) : undefined,
+    })
+    declaredNames.add(extractor.name)
+  }
+
+  const legacyExtractors: Record<string, string> = {}
+  for (const [key, rawExpression] of Object.entries(r.extractors || {})) {
+    if (declaredNames.has(key)) continue
+    const expression = String(rawExpression)
+    if (expression.startsWith('regex:')) {
+      extractorList.push({ key, value: expression.slice(6), source: 'content' })
+    } else if (expression.startsWith('header:')) {
+      extractorList.push({ key, value: '(.+)', source: 'header', headerName: expression.slice(7) })
+    } else if (expression === 'status') {
+      extractorList.push({ key, value: '(.+)', source: 'status' })
+    } else {
+      legacyExtractors[key] = expression
+      continue
+    }
+    declaredNames.add(key)
+  }
+
   const req: HARRequestData = {
     method: r.method || 'GET',
     url: r.url || '',
+    checked: r.checked !== false,
     headers: r.headers || [],
-    extractors: r.extractors || {},
-    _bodyType: r.postData ? 'json' : 'none',
+    extractors: { ...legacyExtractors },
+    _bodyType: r._bodyType || (r.postData ? 'json' : 'none'),
     _bodyContent: r.postData?.text || r.data || '',
-    _conditions: r._conditions || [],
+    _conditions: conditions,
     _testing: false,
     _lastResponse: null,
     _comment: r._comment || r.comment || '',
-    _selected: false,
     _cookies: '',
     _conditionResults: [],
-  }
-  // QD v1 rule → conditions
-  if (r.success_asserts) {
-    for (const a of r.success_asserts) {
-      req._conditions.push({
-        type: a.from === 'status' ? 'status_code' : 'body_contains',
-        operator: 'matches',
-        value: a.re || '',
-        outcome: 'success',
-      })
-    }
-  }
-  if (r.failed_asserts) {
-    for (const a of r.failed_asserts) {
-      req._conditions.push({
-        type: a.from === 'status' ? 'status_code' : 'body_contains',
-        operator: 'matches',
-        value: a.re || '',
-        outcome: 'failure',
-      })
-    }
-  }
-  if (r.extract_variables) {
-    for (const ext of r.extract_variables) {
-      if (ext.name && ext.re) req.extractors[ext.name] = `regex:${ext.re}`
-    }
+    _extractorList: extractorList,
+    _legacyExtractors: legacyExtractors,
   }
   return req
 }
@@ -115,7 +161,65 @@ function removeVariable(i: number) {
 }
 
 // --- Requests list ---
-const selectedCount = computed(() => template.requests.filter((r: HARRequestData) => r._selected).length)
+const enabledRequestCount = computed(
+  () => template.requests.filter((request: HARRequestData) => request.checked).length,
+)
+const allRequestsChecked = computed(
+  () => template.requests.length > 0 && enabledRequestCount.value === template.requests.length,
+)
+const requestClipboard = ref<HARRequestData | null>(null)
+const activeRequestIndex = ref<number | null>(null)
+
+const apiCatalog: Record<string, { label: string; url: string; comment: string }> = {
+  delay: { label: '延时', url: 'api://util/delay/3', comment: 'QD API - 延时 3 秒' },
+  timestamp: { label: '时间戳', url: 'api://util/timestamp', comment: 'QD API - 时间戳' },
+  unicode: {
+    label: 'Unicode 转中文',
+    url: 'api://util/unicode?content=%5Cu4f60%5Cu597d',
+    comment: 'QD API - Unicode 转中文',
+  },
+  gb2312: {
+    label: 'GB2312 编码',
+    url: 'api://util/gb2312?content=%E4%B8%AD%E6%96%87',
+    comment: 'QD API - GB2312 编码',
+  },
+  urldecode: {
+    label: 'URL 解码',
+    url: 'api://util/urldecode?content=%25E4%25BD%25A0%25E5%25A5%25BD',
+    comment: 'QD API - URL 解码',
+  },
+  regex: {
+    label: '正则表达式',
+    url: 'api://util/regex?data=A1%20b2&p=([a-z])(%5Cd)',
+    comment: 'QD API - 正则表达式',
+  },
+  replace: {
+    label: '字符串替换',
+    url: 'api://util/string/replace?s=a-1&p=%5Cd&t=x&r=text',
+    comment: 'QD API - 字符串替换',
+  },
+  rsa: {
+    label: 'RSA 加密/解密',
+    url: 'api://util/rsa?f=encode&key={{rsa_key|urlencode}}&data={{rsa_data|urlencode}}',
+    comment: 'QD API - RSA 加密；请配置 rsa_key 和 rsa_data',
+  },
+}
+
+const apiRequestOptions = [
+  { label: '请求控制', key: 'control', children: [{ label: apiCatalog.delay.label, key: 'delay' }] },
+  { label: '时间处理', key: 'time', children: [{ label: apiCatalog.timestamp.label, key: 'timestamp' }] },
+  {
+    label: '编码解码',
+    key: 'encoding',
+    children: ['unicode', 'gb2312', 'urldecode'].map((key) => ({ label: apiCatalog[key].label, key })),
+  },
+  {
+    label: '字符串处理',
+    key: 'string',
+    children: ['regex', 'replace'].map((key) => ({ label: apiCatalog[key].label, key })),
+  },
+  { label: '加密解密', key: 'crypto', children: [{ label: apiCatalog.rsa.label, key: 'rsa' }] },
+]
 
 function methodType(method: string): any {
   const m: Record<string, string> = {
@@ -132,6 +236,7 @@ function addRequest() {
   const req: HARRequestData = {
     method: 'GET',
     url: '',
+    checked: true,
     headers: [],
     extractors: {},
     _bodyType: 'none',
@@ -140,12 +245,62 @@ function addRequest() {
     _testing: false,
     _lastResponse: null,
     _comment: '',
-    _selected: false,
     _cookies: '',
     _conditionResults: [],
+    _extractorList: [],
+    _legacyExtractors: {},
   }
   template.requests.push(req)
-  openDetail(req)
+  openDetail(req, template.requests.length - 1)
+}
+
+function cloneRequest(request: HARRequestData): HARRequestData {
+  const cloned = JSON.parse(JSON.stringify(request)) as HARRequestData
+  cloned._testing = false
+  cloned._lastResponse = null
+  cloned._conditionResults = []
+  return cloned
+}
+
+function copyRequest(request: HARRequestData) {
+  requestClipboard.value = cloneRequest(request)
+  message.success('请求已复制')
+}
+
+function pasteRequest(afterIndex?: number) {
+  if (!requestClipboard.value) return
+  const fallbackIndex = activeRequestIndex.value ?? template.requests.length - 1
+  const targetIndex = Math.min((afterIndex ?? fallbackIndex) + 1, template.requests.length)
+  template.requests.splice(targetIndex, 0, cloneRequest(requestClipboard.value))
+  activeRequestIndex.value = targetIndex
+  message.success('请求已粘贴')
+}
+
+function moveRequest(index: number, offset: -1 | 1) {
+  const targetIndex = index + offset
+  if (targetIndex < 0 || targetIndex >= template.requests.length) return
+  const [request] = template.requests.splice(index, 1)
+  template.requests.splice(targetIndex, 0, request)
+  if (detailRequest.value === request) activeRequestIndex.value = targetIndex
+}
+
+function toggleAllRequests(checked: boolean) {
+  for (const request of template.requests) request.checked = checked
+}
+
+function insertApiRequest(key: string) {
+  const preset = apiCatalog[key]
+  if (!preset) return
+  const request = parseRequestData({
+    method: 'GET',
+    url: preset.url,
+    checked: true,
+    headers: [],
+    _comment: preset.comment,
+  })
+  const insertAt = Math.min((activeRequestIndex.value ?? template.requests.length - 1) + 1, template.requests.length)
+  template.requests.splice(insertAt, 0, request)
+  openDetail(request, insertAt)
 }
 
 function addRequestsFromParsed(parsedList: any[]) {
@@ -154,56 +309,25 @@ function addRequestsFromParsed(parsedList: any[]) {
       name,
       value: String(value),
     }))
-    const extractors: Record<string, string> = {}
-    if (p.extract_variables) {
-      for (const ext of p.extract_variables) {
-        if (ext.name && ext.re) extractors[ext.name] = `regex:${ext.re}`
-      }
-    }
-    const conditions: any[] = []
-    if (p.success_asserts) {
-      for (const a of p.success_asserts) {
-        conditions.push({
-          type: a.from === 'status' ? 'status_code' : 'body_contains',
-          operator: 'matches',
-          value: a.re || '',
-          outcome: 'success',
-        })
-      }
-    }
-    if (p.failed_asserts) {
-      for (const a of p.failed_asserts) {
-        conditions.push({
-          type: a.from === 'status' ? 'status_code' : 'body_contains',
-          operator: 'matches',
-          value: a.re || '',
-          outcome: 'failure',
-        })
-      }
-    }
-    template.requests.push({
+    template.requests.push(parseRequestData({
       method: p.method || 'GET',
       url: p.url || '',
       headers,
-      extractors,
+      extractors: p.extractors || {},
+      postData: p.body_type && p.body_type !== 'none' ? { text: p.body || '' } : undefined,
       _bodyType: p.body_type || 'none',
-      _bodyContent: p.body || '',
-      _conditions: conditions,
-      _testing: false,
-      _lastResponse: null,
+      success_asserts: p.success_asserts || [],
+      failed_asserts: p.failed_asserts || [],
+      extract_variables: p.extract_variables || [],
       _comment: p.name || '',
-      _selected: false,
-      _cookies: '',
-      _conditionResults: [],
-    })
+      checked: p.checked !== false,
+    }))
   }
 }
 
 function removeRequest(index: number) {
   template.requests.splice(index, 1)
-}
-function deleteSelected() {
-  template.requests = template.requests.filter((r: HARRequestData) => !r._selected)
+  if (activeRequestIndex.value === index) activeRequestIndex.value = null
 }
 
 // --- Detail ---
@@ -212,8 +336,9 @@ const detailRequest = ref<HARRequestData | null>(null)
 const detailTab = ref('request')
 const responseViewMode = ref<'render' | 'source'>('render')
 
-function openDetail(row: HARRequestData) {
+function openDetail(row: HARRequestData, index = template.requests.indexOf(row)) {
   detailRequest.value = row
+  activeRequestIndex.value = index >= 0 ? index : null
   detailTab.value = 'request'
   responseViewMode.value = 'render'
   showDetail.value = true
@@ -298,23 +423,7 @@ function evaluateConditions(req: HARRequestData) {
 
 // --- Extractors ---
 function getExtractorList(req: HARRequestData) {
-  if (!(req as any)._extractorList) {
-    ;(req as any)._extractorList = Object.entries(req.extractors || {}).map(([key, value]) => {
-      let source = 'content'
-      let pattern = String(value)
-      if (pattern.startsWith('regex:')) {
-        source = 'content'
-        pattern = pattern.slice(6)
-      } else if (pattern.startsWith('header:')) {
-        source = 'header'
-        pattern = pattern.slice(7)
-      } else if (pattern === 'status') {
-        source = 'status'
-      }
-      return { key, value: pattern, source }
-    })
-  }
-  return (req as any)._extractorList
+  return req._extractorList
 }
 function addExtractor(req: HARRequestData) {
   getExtractorList(req).push({ key: '', value: '', source: 'content' })
@@ -323,15 +432,22 @@ function removeExtractor(req: HARRequestData, idx: number) {
   getExtractorList(req).splice(idx, 1)
 }
 
-function extractValue(response: any, expression: string, source?: string): any {
+function extractValue(response: any, expression: string, source?: string, headerName?: string): any {
   if (!response || !expression) return null
   try {
     let searchText = response.body
-    if (source === 'status') return response.status_code
-    if (source === 'header' || source === 'header-location') {
-      searchText = Object.entries(response.headers || {})
-        .map(([k, v]) => `${k}: ${v}`)
-        .join('\n')
+    if (source === 'status') searchText = String(response.status_code)
+    if (source === 'header') {
+      if (headerName) {
+        const entry = Object.entries(response.headers || {}).find(
+          ([key]) => key.toLowerCase() === headerName.toLowerCase()
+        )
+        searchText = entry ? String(entry[1]) : ''
+      } else {
+        searchText = Object.entries(response.headers || {})
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n')
+      }
     }
     const match = searchText.match(new RegExp(expression))
     return match ? match[1] || match[0] : null
@@ -364,7 +480,16 @@ async function testRequest(req: HARRequestData) {
     req._lastResponse = res.data
     evaluateConditions(req)
     if (detailRequest.value === req) detailTab.value = 'preview'
-    message.success(`${res.data.status_code} - ${res.data.elapsed_ms.toFixed(0)}ms`)
+    const assertionFailed = req._conditionResults.some((result) => !result.isPass)
+    if (res.data.error || res.data.status_code <= 0) {
+      message.error(`请求测试失败: ${res.data.error || '未知错误'}`)
+    } else if (res.data.status_code >= 400) {
+      message.error(`${res.data.status_code} - ${res.data.elapsed_ms.toFixed(0)}ms`)
+    } else if (assertionFailed) {
+      message.error(`断言失败 - ${res.data.elapsed_ms.toFixed(0)}ms`)
+    } else {
+      message.success(`${res.data.status_code} - ${res.data.elapsed_ms.toFixed(0)}ms`)
+    }
   } catch (err: any) {
     message.error('请求测试失败: ' + (err.response?.data?.detail || err.message))
   } finally {
@@ -441,16 +566,12 @@ function getData(): any {
       requests: template.requests.map((r: any) => ({
         method: r.method,
         url: r.url,
+        checked: r.checked,
         _comment: r._comment,
         headers: r.headers.filter((h: HARHeader) => h.name),
         postData:
           r._bodyType !== 'none' ? { mimeType: 'application/json', text: r._bodyContent } : undefined,
-        extractors:
-          ((r as any)._extractorList || []).reduce((acc: any, e: any) => {
-            if (e.key) acc[e.key] = e.source === 'header' ? `header:${e.value}` : e.source === 'status' ? 'status' : `regex:${e.value}`
-            return acc
-          }, {}) || r.extractors,
-        _conditions: r._conditions || [],
+        extractors: r._legacyExtractors || {},
         // QD v1 compatible rule block
         rule: {
           success_asserts: (r._conditions || [])
@@ -459,12 +580,12 @@ function getData(): any {
           failed_asserts: (r._conditions || [])
             .filter((c: any) => c.outcome === 'failure')
             .map((c: any) => ({ re: c.value, from: c.type === 'status_code' ? 'status' : 'content' })),
-          extract_variables: ((r as any)._extractorList || [])
-            .filter((e: any) => e.key && e.source !== 'status')
+          extract_variables: r._extractorList
+            .filter((e: ExtractorRow) => e.key && e.value)
             .map((e: any) => ({
               name: e.key,
               re: e.value,
-              from: e.source === 'header' ? 'header' : 'content',
+              from: e.source === 'header' && e.headerName ? `header-${e.headerName}` : e.source,
             })),
         },
       })),
@@ -533,17 +654,24 @@ const extractorSourceOptions = [
         <div class="flex justify-between items-center flex-wrap gap-2">
           <div class="flex items-center gap-2">
             <span>请求列表</span>
-            <n-tag size="small" round>{{ template.requests.length }}</n-tag>
-            <n-button v-if="selectedCount > 0" size="tiny" quaternary type="error" @click="deleteSelected">
-              删除选中 ({{ selectedCount }})
-            </n-button>
+            <n-tag size="small" round>{{ enabledRequestCount }}/{{ template.requests.length }} 已启用</n-tag>
           </div>
-          <div class="flex gap-2">
+          <div class="flex flex-wrap gap-2">
             <n-upload :show-file-list="false" accept=".har,.json" :custom-request="handleHarUpload">
               <n-button size="tiny">📥 追加HAR</n-button>
             </n-upload>
             <n-button size="tiny" @click="showCurlDialog = true">📋 追加cURL</n-button>
-            <n-button size="tiny" type="primary" @click="addRequest">+ 添加请求</n-button>
+            <n-button size="tiny" :disabled="!requestClipboard" title="在当前请求后粘贴" @click="pasteRequest()">
+              <template #icon><n-icon><ClipboardOutline /></n-icon></template>
+              粘贴
+            </n-button>
+            <n-dropdown trigger="click" :options="apiRequestOptions" @select="insertApiRequest">
+              <n-button size="tiny">插入 API</n-button>
+            </n-dropdown>
+            <n-button size="tiny" type="primary" @click="addRequest">
+              <template #icon><n-icon><AddOutline /></n-icon></template>
+              添加请求
+            </n-button>
           </div>
         </div>
       </template>
@@ -552,19 +680,32 @@ const extractorSourceOptions = [
       <n-table v-else size="small" :bordered="false">
         <thead>
           <tr>
-            <th class="w-8"></th>
+            <th class="w-8">
+              <n-checkbox
+                :checked="allRequestsChecked"
+                :indeterminate="enabledRequestCount > 0 && !allRequestsChecked"
+                aria-label="启用全部请求"
+                @update:checked="toggleAllRequests"
+              />
+            </th>
             <th class="w-10">#</th>
             <th class="w-20">方法</th>
             <th>URL</th>
             <th class="w-28">备注</th>
             <th class="w-24">状态</th>
-            <th class="w-32 !text-right">操作</th>
+            <th class="w-64 !text-right">操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, i) in template.requests" :key="i" class="cursor-pointer" @click="openDetail(row)">
+          <tr
+            v-for="(row, i) in template.requests"
+            :key="i"
+            class="cursor-pointer"
+            :class="{ 'opacity-55': !row.checked }"
+            @click="openDetail(row, i)"
+          >
             <td @click.stop>
-              <n-checkbox v-model:checked="row._selected" />
+              <n-checkbox v-model:checked="row.checked" :aria-label="`执行请求 ${i + 1}`" />
             </td>
             <td>{{ i + 1 }}</td>
             <td>
@@ -584,6 +725,32 @@ const extractorSourceOptions = [
               <span v-else class="text-gray-300 text-xs">未测试</span>
             </td>
             <td class="!text-right" @click.stop>
+              <n-button size="tiny" quaternary circle title="上移" :disabled="i === 0" @click="moveRequest(i, -1)">
+                <template #icon><n-icon><ArrowUpOutline /></n-icon></template>
+              </n-button>
+              <n-button
+                size="tiny"
+                quaternary
+                circle
+                title="下移"
+                :disabled="i === template.requests.length - 1"
+                @click="moveRequest(i, 1)"
+              >
+                <template #icon><n-icon><ArrowDownOutline /></n-icon></template>
+              </n-button>
+              <n-button size="tiny" quaternary circle title="复制" @click="copyRequest(row)">
+                <template #icon><n-icon><CopyOutline /></n-icon></template>
+              </n-button>
+              <n-button
+                size="tiny"
+                quaternary
+                circle
+                title="粘贴到后面"
+                :disabled="!requestClipboard"
+                @click="pasteRequest(i)"
+              >
+                <template #icon><n-icon><ClipboardOutline /></n-icon></template>
+              </n-button>
               <n-button size="tiny" quaternary type="primary" :loading="row._testing" @click="testRequest(row)">
                 测试
               </n-button>
@@ -709,17 +876,32 @@ const extractorSourceOptions = [
               <div
                 v-for="(ext, eIdx) in getExtractorList(detailRequest!)"
                 :key="eIdx"
-                class="grid grid-cols-1 md:grid-cols-[9rem_minmax(10rem,0.7fr)_minmax(16rem,1.3fr)_auto] items-start gap-2 mb-1 p-2 rounded bg-blue-50 dark:bg-blue-950"
+                class="grid grid-cols-1 md:grid-cols-[8rem_minmax(10rem,0.7fr)_minmax(16rem,1.3fr)_auto] items-start gap-2 mb-1 p-2 rounded bg-blue-50 dark:bg-blue-950"
               >
                 <n-select v-model:value="ext.source" size="small" class="w-full" :options="extractorSourceOptions" />
                 <n-input v-model:value="ext.key" size="small" placeholder="变量名" class="w-full" />
-                <n-input v-model:value="ext.value" size="small" placeholder="(.+)" class="w-full font-mono" />
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <n-input
+                    v-if="ext.source === 'header'"
+                    v-model:value="ext.headerName"
+                    size="small"
+                    placeholder="Header 名称（可选）"
+                    class="w-full"
+                  />
+                  <n-input
+                    v-model:value="ext.value"
+                    size="small"
+                    placeholder="正则，例如 (.+)"
+                    class="w-full font-mono"
+                    :class="ext.source === 'header' ? '' : 'sm:col-span-2'"
+                  />
+                </div>
                 <n-button size="tiny" quaternary type="error" @click="removeExtractor(detailRequest!, eIdx)">✕</n-button>
                 <span
                   class="md:col-span-4 text-xs text-gray-600 dark:text-gray-300 font-mono whitespace-pre-wrap break-all max-h-32 overflow-auto border-t border-blue-100 dark:border-blue-900 pt-2"
-                  :title="String(detailRequest._lastResponse ? extractValue(detailRequest._lastResponse, ext.value, ext.source) ?? '-' : '-')"
+                  :title="String(detailRequest._lastResponse ? extractValue(detailRequest._lastResponse, ext.value, ext.source, ext.headerName) ?? '-' : '-')"
                 >
-                  → {{ detailRequest._lastResponse ? extractValue(detailRequest._lastResponse, ext.value, ext.source) ?? '-' : '-' }}
+                  → {{ detailRequest._lastResponse ? extractValue(detailRequest._lastResponse, ext.value, ext.source, ext.headerName) ?? '-' : '-' }}
                 </span>
               </div>
             </div>
@@ -728,10 +910,10 @@ const extractorSourceOptions = [
               <div class="flex items-center gap-2 mb-2">
                 <span class="text-sm font-medium">响应内容</span>
                 <n-tag
-                  :type="detailRequest._lastResponse.status_code < 300 ? 'success' : 'error'"
+                  :type="detailRequest._lastResponse.error || detailRequest._lastResponse.status_code >= 400 ? 'error' : 'success'"
                   size="tiny"
                 >
-                  {{ detailRequest._lastResponse.status_code }}
+                  {{ detailRequest._lastResponse.error ? 'ERR' : detailRequest._lastResponse.status_code }}
                 </n-tag>
                 <n-button-group size="tiny">
                   <n-button :type="responseViewMode === 'render' ? 'primary' : 'default'" @click="responseViewMode = 'render'">
@@ -743,6 +925,9 @@ const extractorSourceOptions = [
                 </n-button-group>
                 <span class="text-xs text-gray-400">{{ responseContentType }}</span>
               </div>
+              <n-alert v-if="detailRequest._lastResponse.error" type="error" class="mb-2">
+                {{ detailRequest._lastResponse.error }}
+              </n-alert>
               <iframe
                 v-if="responseViewMode === 'render' && isHtmlResponse"
                 :srcdoc="detailRequest._lastResponse.body"

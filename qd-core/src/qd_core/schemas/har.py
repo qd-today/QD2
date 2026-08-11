@@ -109,6 +109,10 @@ class HARRequest(BaseModel):
     bodySize: int = -1
 
     # QD2 extensions
+    checked: bool = Field(
+        default=True,
+        description="Whether this request participates in template execution",
+    )
     variables: dict[str, Any] = Field(
         default_factory=dict,
         description="Template variables extracted from this request",

@@ -165,6 +165,11 @@ class QDScheduler:
             self.scheduler.remove_job(job_id)
             logger.info("Removed task %d from scheduler", task_id)
 
+    def get_next_run_time(self, task_id: int) -> datetime | None:
+        """Return APScheduler's current next fire time for a task."""
+        job = self.scheduler.get_job(f"task_{task_id}")
+        return getattr(job, "next_run_time", None) if job is not None else None
+
     async def run_task_now(self, task_id: int) -> Any | None:
         """Immediately execute a task (manual trigger skips random delay)."""
         return await self._execute_task(task_id, manual=True)
@@ -190,6 +195,7 @@ class QDScheduler:
 
         logger.info("Executing task %d", task_id)
         settings = get_settings()
+        api_base_url = f"http://127.0.0.1:{getattr(settings, 'port', 8924)}"
 
         from qd_server.services.log_stream import log_stream
 
@@ -282,10 +288,18 @@ class QDScheduler:
             error_msg = None
             status_str = "failed"
             task_log = None
-            fetcher = QDFetcher(cookie_session=cookie_session, proxy=proxy)
+            fetcher = QDFetcher(
+                cookie_session=cookie_session,
+                proxy=proxy,
+                api_base_url=api_base_url,
+            )
             for attempt in range(retry_count + 1):
                 # Fresh fetcher per attempt, reusing the same cookie session
-                fetcher = QDFetcher(cookie_session=cookie_session, proxy=proxy)
+                fetcher = QDFetcher(
+                    cookie_session=cookie_session,
+                    proxy=proxy,
+                    api_base_url=api_base_url,
+                )
                 if attempt > 0:
                     log_stream.publish(
                         task.user_id, "task_retry", task_id=task_id, task_name=task.name,

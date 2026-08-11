@@ -40,6 +40,19 @@ def test_daily_schedule_preserves_seconds():
     assert (next_run.hour, next_run.minute, next_run.second) == (8, 30, 15)
 
 
+def test_next_run_time_reads_registered_job():
+    expected = datetime(2026, 3, 4, 5, 6, 7)
+    service = QDScheduler()
+    service.scheduler = SimpleNamespace(
+        get_job=lambda job_id: SimpleNamespace(next_run_time=expected)
+        if job_id == "task_7"
+        else None
+    )
+
+    assert service.get_next_run_time(7) == expected
+    assert service.get_next_run_time(8) is None
+
+
 @pytest.mark.asyncio
 async def test_notifications_are_scoped_to_user_and_task(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -170,7 +183,7 @@ async def test_execution_publishes_and_persists_extracted_task_log(monkeypatch):
         await session.refresh(task)
 
     class FakeFetcher:
-        def __init__(self, cookie_session, proxy=None):
+        def __init__(self, cookie_session, proxy=None, api_base_url=None):
             self.session = cookie_session
 
         async def execute_template(self, _template):

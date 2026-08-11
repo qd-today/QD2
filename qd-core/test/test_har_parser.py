@@ -1,8 +1,8 @@
 """Tests for HAR parser."""
 
 import json
-import pytest
 
+import pytest
 from qd_core.client.har import HARParser
 from qd_core.schemas.har import HARTemplate
 
@@ -41,6 +41,26 @@ def test_parse_har_format():
     template = HARParser.parse_dict(data)
     assert template.name == "imported_template"
     assert len(template.requests) == 1
+
+
+def test_parse_har_preserves_unchecked_requests():
+    data = {
+        "log": {
+            "entries": [
+                {
+                    "checked": False,
+                    "request": {"method": "GET", "url": "https://example.com/skipped"},
+                },
+                {
+                    "request": {"method": "GET", "url": "https://example.com/enabled"},
+                },
+            ]
+        }
+    }
+
+    template = HARParser.parse_dict(data)
+
+    assert [request.checked for request in template.requests] == [False, True]
 
 
 def test_substitute_variables():

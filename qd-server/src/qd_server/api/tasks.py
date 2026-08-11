@@ -56,6 +56,9 @@ class TaskResponse(BaseModel):
     last_status: Optional[str]
     created_at: datetime
     updated_at: datetime
+    success_count: int = 0
+    failed_count: int = 0
+    last_success_at: Optional[datetime] = None
 
 
 class TaskRunResponse(BaseModel):
@@ -81,6 +84,52 @@ class TaskListResponse(BaseModel):
     total: int
 
 
+async def _get_task_run_stats(
+    task_ids: list[int], user_id: int, session: AsyncSession
+) -> dict[int, dict[str, int | datetime | None]]:
+    """Return success/failure counts and latest success time for owned tasks."""
+    if not task_ids:
+        return {}
+
+    stats: dict[int, dict[str, int | datetime | None]] = {
+        task_id: {"success_count": 0, "failed_count": 0, "last_success_at": None}
+        for task_id in task_ids
+    }
+    count_result = await session.execute(
+        select(TaskRun.task_id, TaskRun.status, func.count(TaskRun.id))
+        .where(TaskRun.task_id.in_(task_ids), TaskRun.user_id == user_id)
+        .group_by(TaskRun.task_id, TaskRun.status)
+    )
+    for task_id, run_status, count in count_result.all():
+        if run_status == "success":
+            stats[task_id]["success_count"] = count
+        elif run_status == "failed":
+            stats[task_id]["failed_count"] = count
+
+    success_result = await session.execute(
+        select(TaskRun.task_id, func.max(func.coalesce(TaskRun.finished_at, TaskRun.started_at)))
+        .where(
+            TaskRun.task_id.in_(task_ids),
+            TaskRun.user_id == user_id,
+            TaskRun.status == "success",
+        )
+        .group_by(TaskRun.task_id)
+    )
+    for task_id, last_success_at in success_result.all():
+        stats[task_id]["last_success_at"] = last_success_at
+    return stats
+
+
+def _get_effective_next_run_at(task: Task) -> datetime | None:
+    """Read the live next fire time instead of the legacy unmaintained DB value."""
+    if task.status in ("paused", "disabled"):
+        return None
+
+    from qd_server.services.scheduler import scheduler
+
+    return scheduler.get_next_run_time(task.id) or task.next_run_at
+
+
 # --- Routes ---
 
 @router.get("", response_model=TaskListResponse)
@@ -102,6 +151,7 @@ async def list_tasks(
 
     result = await session.execute(query)
     tasks = result.scalars().all()
+    run_stats = await _get_task_run_stats([task.id for task in tasks], current_user.id, session)
 
     # Get total
     count_query = select(Task).where(Task.user_id == current_user.id)
@@ -122,12 +172,15 @@ async def list_tasks(
                 variables=t.variables,
                 execution_config=t.execution_config or {},
                 group_id=t.group_id,
-                next_run_at=t.next_run_at,
+                next_run_at=_get_effective_next_run_at(t),
                 run_count=t.run_count,
                 last_run_at=t.last_run_at,
                 last_status=t.last_status,
                 created_at=t.created_at,
                 updated_at=t.updated_at,
+                success_count=int(run_stats.get(t.id, {}).get("success_count", 0)),
+                failed_count=int(run_stats.get(t.id, {}).get("failed_count", 0)),
+                last_success_at=run_stats.get(t.id, {}).get("last_success_at"),
             )
             for t in tasks
         ],
@@ -195,7 +248,7 @@ async def create_task(
         variables=task.variables,
         execution_config=task.execution_config or {},
         group_id=task.group_id,
-        next_run_at=task.next_run_at,
+        next_run_at=_get_effective_next_run_at(task),
         run_count=task.run_count,
         last_run_at=task.last_run_at,
         last_status=task.last_status,
@@ -219,6 +272,8 @@ async def get_task(
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    run_stats = await _get_task_run_stats([task.id], current_user.id, session)
+    stats = run_stats[task.id]
     return TaskResponse(
         id=task.id,
         template_id=task.template_id,
@@ -229,12 +284,15 @@ async def get_task(
         variables=task.variables,
         execution_config=task.execution_config or {},
         group_id=task.group_id,
-        next_run_at=task.next_run_at,
+        next_run_at=_get_effective_next_run_at(task),
         run_count=task.run_count,
         last_run_at=task.last_run_at,
         last_status=task.last_status,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        success_count=int(stats["success_count"]),
+        failed_count=int(stats["failed_count"]),
+        last_success_at=stats["last_success_at"],
     )
 
 
@@ -278,6 +336,8 @@ async def update_task(
     else:
         scheduler.add_task(task)
 
+    run_stats = await _get_task_run_stats([task.id], current_user.id, session)
+    stats = run_stats[task.id]
     return TaskResponse(
         id=task.id,
         template_id=task.template_id,
@@ -288,12 +348,15 @@ async def update_task(
         variables=task.variables,
         execution_config=task.execution_config or {},
         group_id=task.group_id,
-        next_run_at=task.next_run_at,
+        next_run_at=_get_effective_next_run_at(task),
         run_count=task.run_count,
         last_run_at=task.last_run_at,
         last_status=task.last_status,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        success_count=int(stats["success_count"]),
+        failed_count=int(stats["failed_count"]),
+        last_success_at=stats["last_success_at"],
     )
 
 
@@ -510,7 +573,7 @@ async def _validate_task_relations(
         select(Template.id).where(
             Template.id == template_id,
             Template.user_id == current_user.id,
-            Template.enabled == True,
+            Template.enabled,
         )
     )
     if result.scalar_one_or_none() is None:
