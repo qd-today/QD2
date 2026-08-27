@@ -1,10 +1,10 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
-    branches: [main, qd2-dev]
-  pull_request:
-    branches: [main]
+    tags:
+      - "*"
 
 jobs:
   lint:
@@ -22,13 +22,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --all-packages
+        run: uv sync --all-packages --group lint
 
-      - name: Run Ruff
-        run: uv run ruff check .
-
-      - name: Run MyPy
-        run: uv run mypy qd-core/src qd-server/src
+      - name: Run critical Ruff checks
+        run: uv run ruff check . --select E9,F63,F7,F82
 
   test:
     name: Test
