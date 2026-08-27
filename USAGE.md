@@ -5,14 +5,34 @@
 ```bash
 cd d:/github/BBB/qd2
 
-# 启动后端 (端口 8924)
-uv run python -m uvicorn qd_server.app:app --host 127.0.0.1 --port 8924
+# 启动后端 (端口 8923)
+uv run python -m uvicorn qd_server.app:app --host 127.0.0.1 --port 8923
 
-# 启动前端 (端口 8923)
+# 启动前端 (端口 8924)
 cd qd-web && npm run dev
 ```
 
-浏览器访问 **http://localhost:8923**
+浏览器访问 **http://localhost:8924**
+
+---
+
+## Docker 部署
+
+Docker 配置统一放在 `docker/` 目录。先修改 [`docker/.env`](docker/.env)，再启动服务：
+
+```bash
+cd docker
+docker compose up -d --build
+```
+
+默认使用 GHCR 最新镜像 `ghcr.io/qd-today/qd2:latest`。若要使用其他已发布版本，修改 `.env` 中 `DOCKER_IMAGE` 的标签，然后执行：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+后端和打包后的前端统一通过 `http://localhost:8923` 访问，数据库保存在 Docker 命名卷 `qd2-data` 中。
 
 ---
 
@@ -59,6 +79,18 @@ cd qd-web && npm run dev
 
 请求 URL: https://api.example.com?token={{token}}
 ```
+
+### 原版 QD 参数与语法
+
+| 参数 / 语法 | 说明 |
+|---|---|
+| `{{_proxy}}` | 当前任务或单请求测试使用的代理地址，支持 HTTP、HTTPS、SOCKS5 |
+| `{{_cookies['name']}}` | 读取当前请求会话中的 Cookie；任务和编辑器测试会话均会保留响应 `Set-Cookie` |
+| `__log__` | 将规则提取变量命名为 `__log__`，其值会写入任务运行日志并推送到实时日志面板 |
+| `{% while ... %}...{% endwhile %}` | 原版 while 语法；支持 `loop_index`、`loop_index0`、`loop_depth` 等循环变量 |
+| `list/ltrim/rtrim` | 原版 `list()` 全局函数和左右空白过滤器 |
+
+单请求测试会在同一次编辑会话中复用 Cookie 和已提取变量；点击“重置测试会话”可清空这些状态。
 
 ---
 
@@ -239,17 +271,33 @@ qd plugin install <plugin-name>
 
 ---
 
-## v1 数据迁移
+## 数据备份与迁移
 
-1. 从旧版 QD 备份 `database.db` 文件
-2. 点击「通知设置」页面上方的「数据迁移」（仅管理员可见）
-3. 上传 `database.db` 文件
-4. 预览将导入的数据量
-5. 确认导入
+登录后点击左侧「数据管理」。
+
+### 个人数据
+
+- 所有用户均可下载自己的 QD2 JSON 备份。
+- 备份包含模板、任务、分组、运行记录、Cookie 会话、通知配置、记事本和模板源。
+- 备份不包含密码、角色、系统设置或其他用户的数据。
+- 上传备份后可先预览，再选择「合并」或「替换」当前账号的数据。
+
+### QD v1 迁移
+
+仅管理员可见。上传旧版 QD 的 `database.db` 并填写原 `AES_KEY`（默认 `binux`），预览确认后迁移。
+迁移包含用户模板、任务引用的公共模板副本、任务、通知渠道和记事本；标准 HAR 会转换为 QD2 可编辑的请求结构。
+v1 用户会以禁用状态导入，管理员需要在「用户管理」中启用账号并重置密码。
+
+### 系统备份
+
+仅管理员可见。SQLite 部署可下载运行时一致的完整 `database.db` 快照，也可上传快照并安排恢复。
+完整恢复会在下次启动后端时执行，恢复前的数据库会自动保留为 `database.before-restore-时间.db`。
 
 ---
 
 ## 环境变量
+
+Docker 部署直接编辑 [`docker/.env`](docker/.env)；该文件包含全部推荐变量及逐项中文注释。
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -257,12 +305,31 @@ qd plugin install <plugin-name>
 | `QD_LOG_LEVEL` | 日志级别 | `INFO` |
 | `QD_DB__DB_TYPE` | 数据库类型 | `sqlite3` |
 | `QD_JWT_SECRET` | JWT 密钥；未配置时自动生成到 `~/.qd2/jwt-secret` | 自动生成 |
-| `QD_PORT` | 后端端口 | `8924` |
+| `QD_PORT` | 后端端口 | `8923` |
+| `QD_MAX_CONCURRENT_TASKS` | 单个服务进程允许同时执行的最大任务数 | `5` |
+| `QD_TASK_REQUEST_LIMIT` | 单次任务运行允许发出的最大 HTTP 请求数，包含重试 | `1500` |
+| `QD_TASK_TIMEOUT` | 单次任务执行最长时间（秒），不包含任务开始前的随机延迟 | `900` |
+| `QD_WHILE_LOOP_LIMIT` | 单个模板 `while` 循环最大迭代次数 | `10000` |
+| `QD_WHILE_LOOP_TIMEOUT` | 单个模板 `while` 循环最长运行时间（秒） | `900` |
+| `QD_LOGIN_RATE_LIMIT` | 同一客户端 IP 与用户名在窗口内允许的失败登录次数；`0` 表示关闭 | `10` |
+| `QD_LOGIN_RATE_LIMIT_WINDOW_SECONDS` | 失败登录计数窗口（秒） | `3600` |
+| `QD_PUBLIC_URL` | 对外访问根地址，供生成邮件或通知链接使用，例如 `https://qd.example.com` | 空 |
+| `QD_ENCRYPTION_KEY` | 任务变量、任务 Cookie、通知渠道配置的固定数据库加密密钥；部署后不要随意修改 | `binux` |
+| `QD_SMTP_SSL` | 邮件渠道未单独指定时是否使用 SMTP SSL/TLS | `false` |
+| `QD_SMTP_STARTTLS` | 邮件渠道未单独指定时是否使用 STARTTLS | `true` |
+| `QD_WS_PING_INTERVAL` | 实时日志 WebSocket 心跳间隔（秒） | `5` |
+| `QD_WS_PING_TIMEOUT` | 实时日志 WebSocket 心跳响应超时（秒） | `30` |
+| `QD_WS_MAX_QUEUE_SIZE` | 每个实时日志连接的待发送消息队列上限 | `100` |
+| `QD_WS_MAX_CONNECTIONS` | 单个后端进程允许的实时日志 WebSocket 连接总数 | `30` |
+
+敏感字段在后端启动时自动从旧明文转换为 AES-256-GCM 密文。默认固定密钥为 `binux`，需要自定义时只需在首次启动前设置 `QD_ENCRYPTION_KEY`，之后保持不变。完整 `database.db` 迁移到其他实例时必须使用相同的 `QD_ENCRYPTION_KEY`。用户自己的 JSON 备份仍以可移植的明文格式导出，应按敏感文件保管。
+
+邮件渠道的 `use_ssl` 和 `use_starttls` 不能同时开启。旧通知配置中的 `use_tls` 会继续按 STARTTLS 处理。
 
 ---
 
 ## API 文档
 
 启动后端后访问：
-- Swagger UI: http://localhost:8924/docs
-- ReDoc: http://localhost:8924/redoc
+- Swagger UI: http://localhost:8923/docs
+- ReDoc: http://localhost:8923/redoc

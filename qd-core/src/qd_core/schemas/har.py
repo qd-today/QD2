@@ -28,6 +28,7 @@ class HARHeader(BaseModel):
 
     name: str
     value: str
+    checked: bool = True
 
 
 class HARCookie(BaseModel):

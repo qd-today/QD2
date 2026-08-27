@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.12-alpine AS python-build
+
+RUN apk add --no-cache build-base cargo
+
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
+COPY qd-core/ ./qd-core/
+COPY qd-cli/ ./qd-cli/
+COPY qd-server/ ./qd-server/
+RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels ./qd-core ./qd-cli ./qd-server
+
+FROM python:3.12-alpine AS runtime
+
+WORKDIR /app
+COPY --from=python-build /wheels /wheels
+RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels qd-cli qd-server \
+    && rm -rf /wheels
+
+EXPOSE 8923
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://localhost:' + os.getenv('QD_PORT', '8923') + '/health')"
+
+CMD ["qd-server"]

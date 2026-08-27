@@ -63,7 +63,12 @@ function connect() {
       connectionError.value = '收到无法解析的日志消息'
       return
     }
-    if (ev.type === 'ping') return
+    if (ev.type === 'ping') {
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'pong', id: (ev as LogEvent & { id?: string }).id }))
+      }
+      return
+    }
     events.value.push(ev)
     if (events.value.length > 500) events.value.splice(0, events.value.length - 500)
     nextTick(() => {

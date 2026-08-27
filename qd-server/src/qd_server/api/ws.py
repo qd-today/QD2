@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import secrets
+import threading
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
@@ -10,6 +12,26 @@ from qd_server.services.log_stream import log_stream
 logger = logging.getLogger("qd2.ws")
 
 router = APIRouter()
+
+
+class _ConnectionSlots:
+    def __init__(self) -> None:
+        self._active = 0
+        self._lock = threading.Lock()
+
+    def acquire(self, maximum: int) -> bool:
+        with self._lock:
+            if self._active >= maximum:
+                return False
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            self._active = max(0, self._active - 1)
+
+
+_connection_slots = _ConnectionSlots()
 
 
 async def _authenticate_ws(token: str) -> int | None:
@@ -42,24 +64,48 @@ async def ws_logs(websocket: WebSocket, token: str = Query("")):
         await websocket.close(code=4401, reason="Unauthorized")
         return
 
-    await websocket.accept()
-    q = log_stream.subscribe(user_id)
+    from qd_server.config import get_settings
 
+    settings = get_settings()
+    if not _connection_slots.acquire(settings.ws_max_connections):
+        await websocket.close(code=4429, reason="Too many WebSocket connections")
+        return
+
+    q = None
     try:
+        await websocket.accept()
+        q = log_stream.subscribe(user_id, settings.ws_max_queue_size)
         # send buffered history first
         for event in log_stream.buffer(user_id):
             await websocket.send_json({**event, "replay": True})
 
+        loop = asyncio.get_running_loop()
+        next_ping_at = loop.time() + settings.ws_ping_interval
         while True:
-            # heartbeat every 30s to keep connection alive through proxies
+            wait_seconds = max(0, next_ping_at - loop.time())
             try:
-                event = await asyncio.wait_for(q.get(), timeout=30)
+                event = await asyncio.wait_for(q.get(), timeout=wait_seconds)
                 await websocket.send_json(event)
             except asyncio.TimeoutError:
-                await websocket.send_json({"type": "ping"})
+                ping_id = secrets.token_urlsafe(8)
+                await websocket.send_json({"type": "ping", "id": ping_id})
+                try:
+                    message = await asyncio.wait_for(
+                        websocket.receive_json(),
+                        timeout=settings.ws_ping_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    await websocket.close(code=4408, reason="WebSocket heartbeat timed out")
+                    return
+                if message.get("type") != "pong" or message.get("id") != ping_id:
+                    await websocket.close(code=4408, reason="WebSocket heartbeat timed out")
+                    return
+                next_ping_at = loop.time() + settings.ws_ping_interval
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.debug("WS closed: %s", e)
     finally:
-        log_stream.unsubscribe(user_id, q)
+        if q is not None:
+            log_stream.unsubscribe(user_id, q)
+        _connection_slots.release()

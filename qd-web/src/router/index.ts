@@ -36,6 +36,11 @@ const router = createRouter({
           component: () => import('@/views/TemplateStore.vue'),
         },
         {
+          path: 'published-templates',
+          name: 'PublishedTemplates',
+          component: () => import('@/views/PublishedTemplates.vue'),
+        },
+        {
           path: 'tasks',
           name: 'Tasks',
           component: () => import('@/views/Tasks.vue'),
@@ -59,6 +64,11 @@ const router = createRouter({
           path: 'notepad',
           name: 'Notepad',
           component: () => import('@/views/Notepad.vue'),
+        },
+        {
+          path: 'data-management',
+          name: 'DataManagement',
+          component: () => import('@/views/DataManagement.vue'),
         },
       ],
     },

@@ -20,8 +20,8 @@ class LogStreamManager:
         self._queues: dict[int, set[asyncio.Queue]] = {}
         self._buffers: dict[int, list[dict]] = {}
 
-    def subscribe(self, user_id: int) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    def subscribe(self, user_id: int, max_queue_size: int = 100) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
         self._queues.setdefault(user_id, set()).add(q)
         return q
 

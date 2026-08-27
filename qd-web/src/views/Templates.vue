@@ -24,6 +24,9 @@ const groupTemplateId = ref<number | null>(null)
 const groupValue = ref('')
 const groupSaving = ref(false)
 const publishSavingId = ref<number | null>(null)
+const currentPage = ref(1)
+const pageSize = ref(20)
+const search = ref('')
 
 function templateGroupName(row: any): string {
   const groupTag = (row.tags || []).find((tag: string) => tag.startsWith('group:'))
@@ -46,8 +49,29 @@ const allTemplatesSelected = computed(
 )
 
 onMounted(() => {
-  templateStore.fetchTemplates()
+  void loadTemplates()
 })
+
+async function loadTemplates() {
+  await templateStore.fetchTemplates(currentPage.value, pageSize.value, search.value.trim())
+  selectedTemplateIds.value = []
+}
+
+async function doSearch() {
+  currentPage.value = 1
+  await loadTemplates()
+}
+
+async function handlePageChange(page: number) {
+  currentPage.value = page
+  await loadTemplates()
+}
+
+async function handlePageSizeChange(size: number) {
+  pageSize.value = size
+  currentPage.value = 1
+  await loadTemplates()
+}
 
 function openCreate() {
   editingId.value = null
@@ -56,9 +80,8 @@ function openCreate() {
 }
 
 function openEdit(row: any) {
-  editingId.value = row.id
-  editorData.value = { ...row }
-  showEditor.value = true
+  const href = router.resolve({ name: 'TemplateDetail', params: { id: row.id } }).href
+  window.open(href, '_blank', 'noopener,noreferrer')
 }
 
 function createTask(row: any) {
@@ -185,6 +208,8 @@ function deleteTemplate(id: number) {
     negativeText: '取消',
     onPositiveClick: async () => {
       await templateStore.deleteTemplate(id)
+      if (templateStore.templates.length === 0 && currentPage.value > 1) currentPage.value--
+      await loadTemplates()
       message.success('已删除')
     },
   })
@@ -195,7 +220,11 @@ function deleteTemplate(id: number) {
   <div>
     <div class="flex flex-wrap justify-between items-center gap-2 mb-4">
       <h2 class="text-lg font-semibold m-0">我的模板</h2>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center justify-end gap-2">
+        <n-input-group class="!w-72">
+          <n-input v-model:value="search" clearable placeholder="搜索模板名称" @keyup.enter="doSearch" />
+          <n-button type="primary" ghost @click="doSearch">搜索</n-button>
+        </n-input-group>
         <n-button type="primary" @click="openCreate">
           <template #icon><n-icon><AddOutline /></n-icon></template>
           新建模板
@@ -306,6 +335,17 @@ function deleteTemplate(id: number) {
             </template>
           </tbody>
         </n-table>
+      </div>
+      <div v-if="templateStore.total > pageSize" class="mt-4 flex justify-end">
+        <n-pagination
+          :page="currentPage"
+          :page-size="pageSize"
+          :item-count="templateStore.total"
+          :page-sizes="[20, 50, 100]"
+          show-size-picker
+          @update:page="handlePageChange"
+          @update:page-size="handlePageSizeChange"
+        />
       </div>
     </n-spin>
 

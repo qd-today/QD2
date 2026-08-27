@@ -68,8 +68,8 @@
 | 缺少 vue-i18n | 安装 vue-i18n |
 | 登录页无注册按钮 | 添加注册/登录切换, 含密码确认 |
 | 首个用户非管理员 | 注册时检测用户数, 首个用户自动设为 admin |
-| 后端端口 8080 | 改为 8924 |
-| 前端端口 3000 | 改为 8923, 代理指向 8924 |
+| 后端端口 8080 | 改为 8923 |
+| 前端端口 3000 | 改为 8924, 代理指向 8923 |
 
 ---
 
@@ -180,7 +180,7 @@
 
 ### 已完成
 - [x] package.json (Vue 3 + Element Plus + Pinia + vue-i18n)
-- [x] vite.config.ts (代理 → 8924, 自动导入)
+- [x] vite.config.ts (代理 → 8923, 自动导入)
 - [x] tsconfig.json
 - [x] index.html
 - [x] src/main.ts (应用入口)
@@ -258,10 +258,11 @@
 ## 阶段六：Docker / CI ✅
 
 ### 已完成
-- [x] Dockerfile (多阶段构建)
-- [x] Dockerfile.lite (精简版)
-- [x] docker-compose.yml
+- [x] docker/Dockerfile (多阶段构建)
+- [x] docker/Dockerfile.lite (精简版)
+- [x] docker/docker-compose.yml + docker/.env
 - [x] .github/workflows/ci.yml (lint + test + build + docker)
+- [x] .github/workflows/docker-publish.yml (多架构 GHCR 镜像 + Tag 源码包)
 
 ---
 
@@ -276,14 +277,14 @@ cd qd-web && npm install && cd ..
 # 运行测试
 uv run pytest
 
-# 启动后端 (端口 8924)
-uv run python -m uvicorn qd_server.app:app --host 127.0.0.1 --port 8924
+# 启动后端 (端口 8923)
+uv run python -m uvicorn qd_server.app:app --host 127.0.0.1 --port 8923
 
-# 启动前端 (端口 8923, 自动代理到后端 8924)
+# 启动前端 (端口 8924, 自动代理到后端 8923)
 cd qd-web && npm run dev
 ```
 
-访问 http://localhost:8923 即可使用 QD2 Web 界面。
+访问 http://localhost:8924 即可使用 QD2 Web 界面。
 首个注册的用户自动成为管理员。
 
 ---

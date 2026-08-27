@@ -4,8 +4,8 @@ import base64
 import time
 
 import pytest
-
 from qd_core.client.render import RenderError, render_string, render_template
+from qd_core.filters import jinja_extensions
 from qd_core.schemas.har import HARHeader, HARPostData, HARRequest, HARTemplate
 
 
@@ -134,6 +134,25 @@ class TestOriginalQDFilters:
 
     def test_inner_globals_range(self):
         assert render_string("{% for i in range(3) %}{{i}}{% endfor %}", {}) == "012"
+
+    def test_list_global_and_trim_filters(self):
+        assert render_string("{{ list('ab') | join('-') }}", {}) == "a-b"
+        assert render_string("{{ '  left  ' | ltrim }}", {}) == "left  "
+        assert render_string("{{ '  right  ' | rtrim }}", {}) == "  right"
+
+    def test_original_loop_aliases(self):
+        template = "{% for item in ['a', 'b'] %}{{loop_index0}}:{{item}}/{{loop_length}};{% endfor %}"
+        assert render_string(template, {}) == "0:a/2;1:b/2;"
+
+    def test_original_while_tag(self):
+        template = "{% while loop_index0 < 3 %}{{loop_index}}{% endwhile %}"
+        assert render_string(template, {}) == "123"
+
+    def test_original_while_tag_enforces_iteration_limit(self, monkeypatch):
+        monkeypatch.setattr(jinja_extensions, "MAX_WHILE_ITERATIONS", 2)
+
+        with pytest.raises(RenderError, match="while loop exceeded 2 iterations"):
+            render_string("{% while true %}loop{% endwhile %}", {})
 
     def test_cookies_access(self):
         assert render_string("{{ _cookies['token'] }}", {}, cookies={"token": "abc123"}) == "abc123"

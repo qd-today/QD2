@@ -5,6 +5,7 @@ httpx responses.
 """
 
 import base64
+import json
 import re
 from typing import Any
 
@@ -73,7 +74,8 @@ def run_rule(
             msg = ""
             matched_any = True
             break
-        msg = f"Fail assert: {{'re': {r.re!r}, 'from': {r.from_!r}}} from success_asserts"
+        assert_data = json.dumps({"re": r.re, "from": r.from_}, ensure_ascii=False)
+        msg = f"Fail assert: {assert_data} from success_asserts"
     if rule.success_asserts and not matched_any:
         success = False
 
@@ -82,11 +84,12 @@ def run_rule(
         pattern = _render(r.re)
         if pattern and re.search(pattern, _get_data(response, r.from_)):
             success = False
-            msg = f"Fail assert: {{'re': {r.re!r}, 'from': {r.from_!r}}} from failed_asserts"
+            assert_data = json.dumps({"re": r.re, "from": r.from_}, ensure_ascii=False)
+            msg = f"Fail assert: {assert_data} from failed_asserts"
             break
 
     if not success and msg and response.status_code >= 400:
-        msg += f", \\r\\nResponse Error : {response.status_code} {response.reason_phrase}"
+        msg += f",Response Error : HTTP {response.status_code}: {response.reason_phrase}"
 
     # --- variable extraction (supports /pattern/flags syntax) ---
     for r in rule.extract_variables:

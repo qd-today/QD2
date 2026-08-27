@@ -7,6 +7,7 @@ import {
   DocumentTextOutline,
   TimerOutline,
   CloudDownloadOutline,
+  ShareSocialOutline,
   NotificationsOutline,
   ExtensionPuzzleOutline,
   BookOutline,
@@ -15,6 +16,7 @@ import {
   SunnyOutline,
   LogOutOutline,
   TerminalOutline,
+  ArchiveOutline,
 } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
@@ -55,6 +57,11 @@ const menuOptions = computed<MenuOption[]>(() => {
       icon: renderIcon(CloudDownloadOutline),
     },
     {
+      label: () => h(RouterLink, { to: '/published-templates' }, { default: () => '已发布模板' }),
+      key: '/published-templates',
+      icon: renderIcon(ShareSocialOutline),
+    },
+    {
       label: () => h(RouterLink, { to: '/notifications' }, { default: () => '通知渠道' }),
       key: '/notifications',
       icon: renderIcon(NotificationsOutline),
@@ -68,6 +75,11 @@ const menuOptions = computed<MenuOption[]>(() => {
       label: () => h(RouterLink, { to: '/notepad' }, { default: () => '记事本' }),
       key: '/notepad',
       icon: renderIcon(BookOutline),
+    },
+    {
+      label: () => h(RouterLink, { to: '/data-management' }, { default: () => '数据管理' }),
+      key: '/data-management',
+      icon: renderIcon(ArchiveOutline),
     },
   ]
   if (authStore.isAdmin) {

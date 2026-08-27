@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -68,12 +68,50 @@ class UserResponse(BaseModel):
 # --- Routes ---
 
 @router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest, session: AsyncSession = Depends(get_session)):
+async def login(
+    request: LoginRequest,
+    http_request: Request,
+    session: AsyncSession = Depends(get_session),
+):
     """Authenticate user and return JWT tokens."""
+    from qd_server.config import get_settings
+    from qd_server.services.login_limiter import login_rate_limiter
+
+    settings = get_settings()
+    client_host = http_request.client.host if http_request.client else "unknown"
+    rate_limit_key = f"{client_host}\0{request.username}"
+    retry_after = login_rate_limiter.retry_after(
+        rate_limit_key,
+        settings.login_rate_limit,
+        settings.login_rate_limit_window_seconds,
+    )
+    if retry_after:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     result = await session.execute(select(User).where(User.username == request.username))
     user = result.scalar_one_or_none()
 
     if user is None or not verify_password(request.password, user.hashed_password):
+        if settings.login_rate_limit:
+            login_rate_limiter.record_failure(
+                rate_limit_key,
+                settings.login_rate_limit_window_seconds,
+            )
+            retry_after = login_rate_limiter.retry_after(
+                rate_limit_key,
+                settings.login_rate_limit,
+                settings.login_rate_limit_window_seconds,
+            )
+            if retry_after:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many failed login attempts",
+                    headers={"Retry-After": str(retry_after)},
+                )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
@@ -85,13 +123,12 @@ async def login(request: LoginRequest, session: AsyncSession = Depends(get_sessi
             detail="Account is disabled",
         )
 
+    login_rate_limiter.clear(rate_limit_key)
+
     # Update last login
     user.last_login = datetime.utcnow()
     session.add(user)
     await session.commit()
-
-    from qd_server.config import get_settings
-    settings = get_settings()
 
     return TokenResponse(
         access_token=create_access_token(user.id, user.username, user.role),

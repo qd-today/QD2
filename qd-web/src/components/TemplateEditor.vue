@@ -9,10 +9,25 @@ import {
   CopyOutline,
 } from '@vicons/ionicons5'
 import api from '@/api'
+import TemplateTextInput from '@/components/TemplateTextInput.vue'
 
 interface HARHeader {
   name: string
   value: string
+  checked?: boolean
+}
+interface HARQueryParameter {
+  name: string
+  value: string
+}
+interface HARCookie {
+  name: string
+  value: string
+  path?: string
+  domain?: string
+  expires?: string
+  httpOnly?: boolean
+  secure?: boolean
 }
 interface RequestCondition {
   type: string
@@ -47,9 +62,12 @@ interface HARRequestData {
   url: string
   checked: boolean
   headers: HARHeader[]
+  cookies: HARCookie[]
   extractors: Record<string, string>
+  _queryParams: HARQueryParameter[]
   _bodyType: string
   _bodyContent: string
+  _bodyMimeType: string
   _conditions: RequestCondition[]
   _testing: boolean
   _lastResponse: any
@@ -58,6 +76,29 @@ interface HARRequestData {
   _conditionResults: any[]
   _extractorList: ExtractorRow[]
   _legacyExtractors: Record<string, string>
+  _resourceType: string
+  _hasResponseSetCookie: boolean
+}
+
+type RequestFilter =
+  | 'all'
+  | 'selected'
+  | 'recommended'
+  | 'document'
+  | 'script'
+  | 'style'
+  | 'image'
+  | 'media'
+  | 'other'
+  | 'xhr'
+  | 'set-cookie'
+  | 'variables'
+type RequestScope = 'all' | 'selected' | 'recommended'
+type RequestCategory = Exclude<RequestFilter, 'selected' | 'recommended'>
+
+function isForbiddenRequestHeader(name: string) {
+  const normalized = name.trim().toLowerCase()
+  return normalized.startsWith(':') || normalized === 'authority'
 }
 
 const message = useMessage()
@@ -70,6 +111,7 @@ const initialRequests =
     ? rawTplData.map((e: any) => ({
         ...(e.request || {}),
         checked: e.checked ?? e.request?.checked ?? true,
+        _comment: e.comment ?? e.request?._comment ?? e.request?.comment ?? '',
         ...ruleToLegacy(e.rule),
       }))
     : rawTplData?.requests) ||
@@ -97,6 +139,11 @@ function bodyMimeType(bodyType: string): string {
   if (bodyType === 'json') return 'application/json'
   if (bodyType === 'form') return 'application/x-www-form-urlencoded'
   return 'text/plain'
+}
+
+function handleBodyTypeChange(request: HARRequestData, bodyType: string) {
+  request._bodyType = bodyType
+  request._bodyMimeType = bodyType === 'none' ? '' : bodyMimeType(bodyType)
 }
 
 const template = reactive({
@@ -164,10 +211,17 @@ function parseRequestData(r: any): HARRequestData {
     method: r.method || 'GET',
     url: r.url || '',
     checked: r.checked !== false,
-    headers: r.headers || [],
+    headers: (r.headers || []).map((header: any) => ({
+      name: header.name || '',
+      value: header.value || '',
+      checked: header.checked !== false && !isForbiddenRequestHeader(String(header.name || '')),
+    })),
+    cookies: r.cookies || [],
     extractors: { ...legacyExtractors },
+    _queryParams: queryParamsFromRequest(r),
     _bodyType: inferBodyType(r),
     _bodyContent: r.postData?.text ?? r.data ?? '',
+    _bodyMimeType: r.postData?.mimeType || r.mimeType || '',
     _conditions: conditions,
     _testing: false,
     _lastResponse: null,
@@ -176,6 +230,8 @@ function parseRequestData(r: any): HARRequestData {
     _conditionResults: [],
     _extractorList: extractorList,
     _legacyExtractors: legacyExtractors,
+    _resourceType: String(r._resourceType || r.resource_type || 'other').toLowerCase(),
+    _hasResponseSetCookie: Boolean(r._hasResponseSetCookie ?? r.response_set_cookie),
   }
   return req
 }
@@ -184,11 +240,28 @@ function parseRequestData(r: any): HARRequestData {
 const variableList = ref(
   Object.entries(template.variables).map(([key, value]) => ({ key, value: String(value) }))
 )
+const testRuntimeVariables = reactive<Record<string, string>>({})
+const testProxy = ref('')
+const testSessionId = `editor-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`
+const clearingTestSession = ref(false)
 function addVariable() {
   variableList.value.push({ key: '', value: '' })
 }
 function removeVariable(i: number) {
   variableList.value.splice(i, 1)
+}
+
+async function clearTestSession() {
+  clearingTestSession.value = true
+  try {
+    await api.delete(`/api/test/sessions/${testSessionId}`)
+    for (const key of Object.keys(testRuntimeVariables)) delete testRuntimeVariables[key]
+    message.success('测试会话已重置')
+  } catch (err: any) {
+    message.error(err.response?.data?.detail || '测试会话重置失败')
+  } finally {
+    clearingTestSession.value = false
+  }
 }
 
 // --- Requests list ---
@@ -200,6 +273,124 @@ const allRequestsChecked = computed(
 )
 const requestClipboard = ref<HARRequestData | null>(null)
 const activeRequestIndex = ref<number | null>(null)
+const requestScope = ref<RequestScope>('all')
+const requestCategory = ref<RequestCategory>('all')
+
+function requestHasVariables(request: HARRequestData) {
+  const values = [
+    request.url,
+    request._bodyContent,
+    ...request.headers.flatMap((header) => [header.name, header.value]),
+    ...request.cookies.flatMap((cookie) => [cookie.name, cookie.value]),
+  ]
+  return values.some((value) => /{{[\s\S]*?}}|{%[\s\S]*?%}/.test(String(value || '')))
+}
+
+function requestVariableNames(request: HARRequestData) {
+  const names = new Set<string>()
+  const values = [
+    request.url,
+    request._bodyContent,
+    ...request._queryParams.flatMap((parameter) => [parameter.name, parameter.value]),
+    ...request.headers.flatMap((header) => [header.name, header.value]),
+    ...request.cookies.flatMap((cookie) => [cookie.name, cookie.value]),
+  ]
+  for (const value of values) {
+    for (const match of String(value || '').matchAll(/{{\s*([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      names.add(match[1])
+    }
+  }
+  for (const extractor of request._extractorList) {
+    if (extractor.key.trim()) names.add(extractor.key.trim())
+  }
+  for (const name of Object.keys(request.extractors)) names.add(name)
+  for (const name of Object.keys(request._legacyExtractors)) names.add(name)
+  return Array.from(names)
+}
+
+function formatVariableName(name: string) {
+  return `{{ ${name} }}`
+}
+
+function requestIsXhr(request: HARRequestData) {
+  const resourceType = request._resourceType.toLowerCase()
+  if (['xhr', 'fetch', 'xmlhttprequest'].includes(resourceType)) return true
+  return request.headers.some(
+    (header) => header.name.toLowerCase() === 'x-requested-with'
+      && header.value.toLowerCase() === 'xmlhttprequest',
+  )
+}
+
+function requestHasSetCookieSignal(request: HARRequestData) {
+  return request._hasResponseSetCookie || request._extractorList.some(
+    (extractor) => extractor.source === 'header'
+      && extractor.headerName?.toLowerCase() === 'set-cookie',
+  )
+}
+
+function requestResourceCategory(request: HARRequestData): RequestFilter {
+  const resourceType = request._resourceType.toLowerCase()
+  if (['document', 'doc', 'html'].includes(resourceType)) return 'document'
+  if (['script', 'javascript', 'js'].includes(resourceType)) return 'script'
+  if (['stylesheet', 'style', 'css'].includes(resourceType)) return 'style'
+  if (['image', 'img'].includes(resourceType)) return 'image'
+  if (['media', 'audio', 'video', 'font'].includes(resourceType)) return 'media'
+
+  const path = request.url.split(/[?#]/, 1)[0].toLowerCase()
+  if (/\.(?:html?|xhtml)$/.test(path)) return 'document'
+  if (/\.(?:m?js|cjs)$/.test(path)) return 'script'
+  if (/\.css$/.test(path)) return 'style'
+  if (/\.(?:avif|bmp|gif|ico|jpe?g|png|svg|webp)$/.test(path)) return 'image'
+  if (/\.(?:aac|flac|m3u8|m4a|m4v|mp3|mp4|mpeg|ogg|ogv|wav|webm|woff2?|ttf|otf)$/.test(path)) return 'media'
+  return 'other'
+}
+
+function requestIsRecommended(request: HARRequestData) {
+  return requestIsXhr(request) || requestHasSetCookieSignal(request) || requestHasVariables(request)
+}
+
+function requestMatchesFilter(request: HARRequestData, filter: RequestFilter) {
+  if (filter === 'all') return true
+  if (filter === 'selected') return request.checked
+  if (filter === 'recommended') return requestIsRecommended(request)
+  if (filter === 'xhr') return requestIsXhr(request)
+  if (filter === 'set-cookie') return requestHasSetCookieSignal(request)
+  if (filter === 'variables') return requestHasVariables(request)
+  return requestResourceCategory(request) === filter
+}
+
+function requestFilterCount(filter: RequestFilter) {
+  return template.requests.filter((request: HARRequestData) => requestMatchesFilter(request, filter)).length
+}
+
+const requestScopeFilters = computed(() => [
+  { key: 'all' as const, label: '所有请求 / All Requests', count: requestFilterCount('all') },
+  { key: 'selected' as const, label: '已选择请求 / Selected', count: requestFilterCount('selected') },
+  { key: 'recommended' as const, label: '推荐关联请求 / Recommended', count: requestFilterCount('recommended') },
+])
+
+const requestResourceFilters = computed(() => [
+  { key: 'all' as const, label: 'All', count: requestFilterCount('all') },
+  { key: 'document' as const, label: 'Documents', count: requestFilterCount('document') },
+  { key: 'script' as const, label: 'JavaScript', count: requestFilterCount('script') },
+  { key: 'style' as const, label: 'Styles', count: requestFilterCount('style') },
+  { key: 'image' as const, label: 'Images', count: requestFilterCount('image') },
+  { key: 'media' as const, label: 'Media', count: requestFilterCount('media') },
+  { key: 'other' as const, label: 'Others', count: requestFilterCount('other') },
+])
+
+const requestSignalFilters = computed(() => [
+  { key: 'xhr' as const, label: 'XMLHttpRequest / Fetch', count: requestFilterCount('xhr') },
+  { key: 'set-cookie' as const, label: 'Set-Cookie', count: requestFilterCount('set-cookie') },
+  { key: 'variables' as const, label: '请求中有变量', count: requestFilterCount('variables') },
+])
+
+const filteredRequests = computed(() => template.requests
+  .map((request: HARRequestData, index: number) => ({ request, index }))
+  .filter(({ request }: { request: HARRequestData, index: number }) => (
+    requestMatchesFilter(request, requestScope.value)
+      && requestMatchesFilter(request, requestCategory.value)
+  )))
 
 const status200: ApiRulePreset = { re: '200', from: 'status' }
 const jsonStatus200: ApiRulePreset = { re: '"状态": "200"', from: 'content' }
@@ -323,9 +514,12 @@ function addRequest() {
     url: '',
     checked: true,
     headers: [],
+    cookies: [],
     extractors: {},
+    _queryParams: [],
     _bodyType: 'none',
     _bodyContent: '',
+    _bodyMimeType: '',
     _conditions: [],
     _testing: false,
     _lastResponse: null,
@@ -334,6 +528,8 @@ function addRequest() {
     _conditionResults: [],
     _extractorList: [],
     _legacyExtractors: {},
+    _resourceType: 'other',
+    _hasResponseSetCookie: false,
   }
   template.requests.push(req)
   openDetail(req, template.requests.length - 1)
@@ -373,6 +569,17 @@ function toggleAllRequests(checked: boolean) {
   for (const request of template.requests) request.checked = checked
 }
 
+function invertRequests() {
+  for (const request of template.requests) request.checked = !request.checked
+}
+
+function applyRecommendedRequests() {
+  for (const request of template.requests) request.checked = requestIsRecommended(request)
+  requestScope.value = 'selected'
+  requestCategory.value = 'all'
+  message.success(`已选择 ${enabledRequestCount.value} 个推荐关联请求`)
+}
+
 function splitRequestUrl(url: string) {
   const hashIndex = url.indexOf('#')
   const hash = hashIndex >= 0 ? url.slice(hashIndex) : ''
@@ -383,6 +590,91 @@ function splitRequestUrl(url: string) {
     query: queryIndex >= 0 ? withoutHash.slice(queryIndex + 1) : '',
     hash,
   }
+}
+
+function safeDecodeQueryPart(value: string) {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, ' '))
+  } catch {
+    return value
+  }
+}
+
+function stripAutomaticUrlencode(value: string) {
+  return value.replace(/{{([\s\S]*?)}}/g, (templateBlock, expression: string) => {
+    const stripped = expression.replace(/\s*\|\s*urlencode(?:\([^)]*\))?\s*$/, '').trim()
+    return stripped === expression.trim() ? templateBlock : `{{${stripped}}}`
+  })
+}
+
+function parseQueryParamsFromUrl(url: string): HARQueryParameter[] {
+  const { query } = splitRequestUrl(url)
+  if (!query) return []
+  return query.split('&').filter(Boolean).map((part) => {
+    const separatorIndex = part.indexOf('=')
+    const rawName = separatorIndex >= 0 ? part.slice(0, separatorIndex) : part
+    const rawValue = separatorIndex >= 0 ? part.slice(separatorIndex + 1) : ''
+    return {
+      name: stripAutomaticUrlencode(safeDecodeQueryPart(rawName)),
+      value: stripAutomaticUrlencode(safeDecodeQueryPart(rawValue)),
+    }
+  })
+}
+
+function queryParamsFromRequest(request: any): HARQueryParameter[] {
+  if (Array.isArray(request.queryString) && request.queryString.length > 0) {
+    return request.queryString.map((query: any) => ({
+      name: stripAutomaticUrlencode(String(query.name || '')),
+      value: stripAutomaticUrlencode(String(query.value || '')),
+    }))
+  }
+  return parseQueryParamsFromUrl(request.url || '')
+}
+
+function encodeQueryTemplatePart(value: string) {
+  return value
+    .split(/({{[\s\S]*?}}|{%[\s\S]*?%}|{#[\s\S]*?#})/g)
+    .filter((part) => part !== '')
+    .map((part) => {
+      if (!part.startsWith('{{')) return part.startsWith('{%') || part.startsWith('{#') ? part : encodeURIComponent(part)
+      const expression = part.slice(2, -2).trim()
+      if (/\|\s*urlencode(?:\([^)]*\))?\s*$/.test(expression)) return `{{${expression}}}`
+      return `{{${expression}|urlencode}}`
+    })
+    .join('')
+}
+
+function syncQueryParamsToUrl(request: HARRequestData) {
+  const { base, hash } = splitRequestUrl(request.url)
+  const query = request._queryParams
+    .filter((item) => item.name)
+    .map((item) => `${encodeQueryTemplatePart(item.name)}=${encodeQueryTemplatePart(item.value)}`)
+    .join('&')
+  request.url = `${base}${query ? `?${query}` : ''}${hash}`
+}
+
+function handleRequestUrlChange(request: HARRequestData, url: string) {
+  request.url = url
+  request._queryParams = parseQueryParamsFromUrl(url)
+}
+
+function addQueryParam(request: HARRequestData) {
+  request._queryParams.push({ name: '', value: '' })
+}
+
+function updateQueryParam(
+  request: HARRequestData,
+  index: number,
+  field: keyof HARQueryParameter,
+  value: string,
+) {
+  request._queryParams[index][field] = value
+  syncQueryParamsToUrl(request)
+}
+
+function removeQueryParam(request: HARRequestData, index: number) {
+  request._queryParams.splice(index, 1)
+  syncQueryParamsToUrl(request)
 }
 
 function handleMethodChange(request: HARRequestData, method: string) {
@@ -398,12 +690,16 @@ function handleMethodChange(request: HARRequestData, method: string) {
     const bodyQuery = request._bodyContent.replace(/^\?/, '')
     const mergedQuery = [query, bodyQuery].filter(Boolean).join('&')
     request.url = `${base}${mergedQuery ? `?${mergedQuery}` : ''}${hash}`
+    request._queryParams = parseQueryParamsFromUrl(request.url)
     request._bodyType = 'none'
     request._bodyContent = ''
+    request._bodyMimeType = ''
   } else if (method === 'POST') {
     request.url = `${base}${hash}`
+    request._queryParams = []
     request._bodyType = 'form'
     request._bodyContent = query
+    request._bodyMimeType = bodyMimeType('form')
   }
 }
 
@@ -430,22 +726,36 @@ function insertApiRequest(key: string) {
 
 function addRequestsFromParsed(parsedList: any[]) {
   for (const p of parsedList) {
-    const headers = Object.entries(p.headers || {}).map(([name, value]) => ({
-      name,
-      value: String(value),
-    }))
+    const headers = Array.isArray(p.header_list)
+      ? p.header_list.map((header: any) => ({
+          name: String(header.name),
+          value: String(header.value),
+          checked: header.checked !== false && !isForbiddenRequestHeader(String(header.name)),
+        }))
+      : Object.entries(p.headers || {}).map(([name, value]) => ({
+          name,
+          value: String(value),
+          checked: !isForbiddenRequestHeader(name),
+        }))
     template.requests.push(parseRequestData({
       method: p.method || 'GET',
       url: p.url || '',
       headers,
+      cookies: p.cookies || [],
+      queryString: p.query_string || [],
       extractors: p.extractors || {},
-      postData: p.body_type && p.body_type !== 'none' ? { text: p.body || '' } : undefined,
+      postData:
+        p.body_type && p.body_type !== 'none'
+          ? { mimeType: p.mime_type || bodyMimeType(p.body_type), text: p.body ?? '' }
+          : undefined,
       _bodyType: p.body_type || 'none',
       success_asserts: p.success_asserts || [],
       failed_asserts: p.failed_asserts || [],
       extract_variables: p.extract_variables || [],
       _comment: p.name || '',
       checked: p.checked !== false,
+      _resourceType: p.resource_type || 'other',
+      _hasResponseSetCookie: p.response_set_cookie === true,
     }))
   }
 }
@@ -480,10 +790,20 @@ const isHtmlResponse = computed(() => responseContentType.value === 'HTML')
 const isJsonResponse = computed(() => responseContentType.value === 'JSON')
 
 function addHeader(req: HARRequestData) {
-  req.headers.push({ name: '', value: '' })
+  req.headers.push({ name: '', value: '', checked: true })
 }
 function removeHeader(req: HARRequestData, idx: number) {
   req.headers.splice(idx, 1)
+}
+function updateHeaderName(header: HARHeader, name: string) {
+  header.name = name
+  if (isForbiddenRequestHeader(name)) header.checked = false
+}
+function addCookie(req: HARRequestData) {
+  req.cookies.push({ name: '', value: '', path: '/' })
+}
+function removeCookie(req: HARRequestData, idx: number) {
+  req.cookies.splice(idx, 1)
 }
 
 // --- Conditions ---
@@ -546,6 +866,31 @@ function evaluateConditions(req: HARRequestData) {
   })
 }
 
+function requestRule(req: HARRequestData) {
+  const conditionSource = (condition: RequestCondition) => {
+    if (condition.type === 'status_code') return 'status'
+    if (condition.type === 'header_contains') return 'header'
+    return 'content'
+  }
+  return {
+    success_asserts: (req._conditions || [])
+      .filter((condition) => condition.outcome === 'success')
+      .map((condition) => ({ re: condition.value, from: conditionSource(condition) })),
+    failed_asserts: (req._conditions || [])
+      .filter((condition) => condition.outcome === 'failure')
+      .map((condition) => ({ re: condition.value, from: conditionSource(condition) })),
+    extract_variables: req._extractorList
+      .filter((extractor) => extractor.key && extractor.value)
+      .map((extractor) => ({
+        name: extractor.key,
+        re: extractor.value,
+        from: extractor.source === 'header' && extractor.headerName
+          ? `header-${extractor.headerName}`
+          : extractor.source,
+      })),
+  }
+}
+
 // --- Extractors ---
 function getExtractorList(req: HARRequestData) {
   return req._extractorList
@@ -557,28 +902,9 @@ function removeExtractor(req: HARRequestData, idx: number) {
   getExtractorList(req).splice(idx, 1)
 }
 
-function extractValue(response: any, expression: string, source?: string, headerName?: string): any {
-  if (!response || !expression) return null
-  try {
-    let searchText = response.body
-    if (source === 'status') searchText = String(response.status_code)
-    if (source === 'header') {
-      if (headerName) {
-        const entry = Object.entries(response.headers || {}).find(
-          ([key]) => key.toLowerCase() === headerName.toLowerCase()
-        )
-        searchText = entry ? String(entry[1]) : ''
-      } else {
-        searchText = Object.entries(response.headers || {})
-          .map(([k, v]) => `${k}: ${v}`)
-          .join('\n')
-      }
-    }
-    const match = searchText.match(new RegExp(expression))
-    return match ? match[1] || match[0] : null
-  } catch {
-    return null
-  }
+function extractedValue(response: any, key: string): any {
+  if (!response || !key) return null
+  return response.extracted_variables?.[key] ?? null
 }
 
 // --- Test ---
@@ -592,20 +918,34 @@ async function testRequest(req: HARRequestData) {
   try {
     const headers: Record<string, string> = {}
     for (const h of req.headers) {
-      if (h.name) headers[h.name] = h.value
+      if (h.name && h.checked !== false) headers[h.name] = h.value
     }
     const res = await api.post('/api/test/test', {
       method: req.method,
       url: req.url,
       headers,
+      header_list: req.headers,
+      cookies: req.cookies,
       body: req._bodyType !== 'none' ? req._bodyContent : null,
       body_type: req._bodyType,
+      mime_type: req._bodyMimeType || null,
       timeout: 30,
+      proxy: testProxy.value.trim() || null,
+      session_id: testSessionId,
+      extractors: req._legacyExtractors || {},
+      rule: requestRule(req),
+      variables: {
+        ...Object.fromEntries(variableList.value.filter((variable) => variable.key).map((variable) => [variable.key, variable.value])),
+        ...testRuntimeVariables,
+      },
     })
     req._lastResponse = res.data
     evaluateConditions(req)
+    for (const [key, value] of Object.entries(res.data.extracted_variables || {})) {
+      testRuntimeVariables[key] = String(value)
+    }
     if (detailRequest.value === req) detailTab.value = 'preview'
-    const assertionFailed = req._conditionResults.some((result) => !result.isPass)
+    const assertionFailed = res.data.success === false
     if (res.data.error || res.data.status_code <= 0) {
       message.error(`请求测试失败: ${res.data.error || '未知错误'}`)
     } else if (res.data.status_code >= 400) {
@@ -641,8 +981,16 @@ async function handleHarUpload(options: any) {
         message.warning('HAR 文件中没有找到请求')
         return
       }
+      const startIndex = template.requests.length
       addRequestsFromParsed(res.data)
-      message.success(`已追加 ${res.data.length} 个请求`)
+      const recommendedCount = template.requests
+        .slice(startIndex)
+        .filter((request: HARRequestData) => requestIsRecommended(request)).length
+      if (recommendedCount > 0) {
+        requestScope.value = 'recommended'
+        requestCategory.value = 'all'
+      }
+      message.success(`已追加 ${res.data.length} 个请求，推荐 ${recommendedCount} 个关联请求`)
     } catch (err: any) {
       message.error('HAR 解析失败: ' + (err.response?.data?.detail || err.message))
     }
@@ -693,28 +1041,20 @@ function getData(): any {
         url: r.url,
         checked: r.checked,
         _comment: r._comment,
-        headers: r.headers.filter((h: HARHeader) => h.name),
+        headers: r.headers
+          .filter((h: HARHeader) => h.name)
+          .map((h: HARHeader) => ({ name: h.name, value: h.value, checked: h.checked !== false })),
+        cookies: r.cookies.filter((cookie: HARCookie) => cookie.name),
+        queryString: r._queryParams.filter((query: HARQueryParameter) => query.name),
         postData:
           r._bodyType !== 'none'
-            ? { mimeType: bodyMimeType(r._bodyType), text: r._bodyContent }
+            ? { mimeType: r._bodyMimeType || bodyMimeType(r._bodyType), text: r._bodyContent }
             : undefined,
         extractors: r._legacyExtractors || {},
+        _resourceType: r._resourceType,
+        _hasResponseSetCookie: r._hasResponseSetCookie,
         // QD v1 compatible rule block
-        rule: {
-          success_asserts: (r._conditions || [])
-            .filter((c: any) => c.outcome === 'success')
-            .map((c: any) => ({ re: c.value, from: c.type === 'status_code' ? 'status' : 'content' })),
-          failed_asserts: (r._conditions || [])
-            .filter((c: any) => c.outcome === 'failure')
-            .map((c: any) => ({ re: c.value, from: c.type === 'status_code' ? 'status' : 'content' })),
-          extract_variables: r._extractorList
-            .filter((e: ExtractorRow) => e.value)
-            .map((e: any) => ({
-              name: e.key,
-              re: e.value,
-              from: e.source === 'header' && e.headerName ? `header-${e.headerName}` : e.source,
-            })),
-        },
+        rule: requestRule(r),
       })),
     },
   }
@@ -736,6 +1076,42 @@ const extractorSourceOptions = [
 
 <template>
   <div>
+    <div class="sticky top-0 z-30 -mx-1 mb-3 border-b border-gray-200 bg-white/95 px-2 py-2 shadow-sm backdrop-blur dark:border-gray-700 dark:bg-gray-900/95">
+      <div class="flex items-center gap-2">
+        <div v-if="$slots['toolbar-leading']" class="shrink-0">
+          <slot name="toolbar-leading" />
+        </div>
+        <div class="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto pb-0.5">
+          <div class="shrink-0">
+            <n-upload :show-file-list="false" accept=".har,.json" :custom-request="handleHarUpload">
+              <n-button size="small">追加 HAR</n-button>
+            </n-upload>
+          </div>
+          <n-button class="shrink-0" size="small" @click="showCurlDialog = true">追加 cURL</n-button>
+          <n-button
+            class="shrink-0"
+            size="small"
+            :disabled="!requestClipboard"
+            title="在当前请求后粘贴"
+            @click="pasteRequest()"
+          >
+            <template #icon><n-icon><ClipboardOutline /></n-icon></template>
+            粘贴
+          </n-button>
+          <n-dropdown trigger="click" :options="apiRequestOptions" @select="insertApiRequest">
+            <n-button class="shrink-0" size="small">插入 API</n-button>
+          </n-dropdown>
+          <n-button class="shrink-0" size="small" type="primary" @click="addRequest">
+            <template #icon><n-icon><AddOutline /></n-icon></template>
+            添加请求
+          </n-button>
+        </div>
+        <div v-if="$slots['toolbar-action']" class="shrink-0 border-l border-gray-200 pl-2 dark:border-gray-700">
+          <slot name="toolbar-action" />
+        </div>
+      </div>
+    </div>
+
     <!-- Basic info -->
     <n-card size="small" title="模板信息" class="rounded-lg mb-3">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -775,6 +1151,18 @@ const extractorSourceOptions = [
       </div>
     </n-card>
 
+    <n-card size="small" title="单请求测试设置" class="rounded-lg mb-3">
+      <div class="flex flex-col sm:flex-row gap-2">
+        <n-input
+          v-model:value="testProxy"
+          clearable
+          placeholder="测试代理：http://host:port 或 socks5://host:port"
+          class="flex-1"
+        />
+        <n-button :loading="clearingTestSession" @click="clearTestSession">重置测试会话</n-button>
+      </div>
+    </n-card>
+
     <!-- Requests -->
     <n-card size="small" class="rounded-lg">
       <template #header>
@@ -783,122 +1171,182 @@ const extractorSourceOptions = [
             <span>请求列表</span>
             <n-tag size="small" round>{{ enabledRequestCount }}/{{ template.requests.length }} 已启用</n-tag>
           </div>
-          <div class="flex flex-wrap gap-2">
-            <n-upload :show-file-list="false" accept=".har,.json" :custom-request="handleHarUpload">
-              <n-button size="tiny">📥 追加HAR</n-button>
-            </n-upload>
-            <n-button size="tiny" @click="showCurlDialog = true">📋 追加cURL</n-button>
-            <n-button size="tiny" :disabled="!requestClipboard" title="在当前请求后粘贴" @click="pasteRequest()">
-              <template #icon><n-icon><ClipboardOutline /></n-icon></template>
-              粘贴
-            </n-button>
-            <n-dropdown trigger="click" :options="apiRequestOptions" @select="insertApiRequest">
-              <n-button size="tiny">插入 API</n-button>
-            </n-dropdown>
-            <n-button size="tiny" type="primary" @click="addRequest">
-              <template #icon><n-icon><AddOutline /></n-icon></template>
-              添加请求
-            </n-button>
+          <div class="flex items-center gap-1">
+            <n-button size="tiny" @click="toggleAllRequests(true)">全选</n-button>
+            <n-button size="tiny" @click="invertRequests">反选</n-button>
           </div>
         </div>
       </template>
 
       <n-empty v-if="template.requests.length === 0" description="暂无请求" size="small" />
-      <n-table v-else size="small" :bordered="false">
-        <thead>
-          <tr>
-            <th class="w-8">
-              <n-checkbox
-                :checked="allRequestsChecked"
-                :indeterminate="enabledRequestCount > 0 && !allRequestsChecked"
-                aria-label="启用全部请求"
-                @update:checked="toggleAllRequests"
-              />
-            </th>
-            <th class="w-10">#</th>
-            <th class="w-20">方法</th>
-            <th>URL</th>
-            <th class="w-28">备注</th>
-            <th class="w-24">状态</th>
-            <th class="w-64 !text-right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="(row, i) in template.requests"
-            :key="i"
-            class="cursor-pointer"
-            :class="{ 'opacity-55': !row.checked }"
-            @click="openDetail(row, i)"
-          >
-            <td @click.stop>
-              <n-checkbox v-model:checked="row.checked" :aria-label="`执行请求 ${i + 1}`" />
-            </td>
-            <td>{{ i + 1 }}</td>
-            <td>
-              <n-tag :type="methodType(row.method)" size="tiny" round>{{ row.method }}</n-tag>
-            </td>
-            <td class="font-mono text-xs max-w-96 truncate" :title="row.url">{{ row.url || '(未设置)' }}</td>
-            <td class="text-xs text-gray-400 truncate">{{ row._comment || '-' }}</td>
-            <td>
-              <template v-if="row._lastResponse">
-                <n-tag
-                  :type="row._lastResponse.error ? 'error' : row._lastResponse.status_code < 300 ? 'success' : 'warning'"
-                  size="tiny"
-                >
-                  {{ row._lastResponse.error ? 'ERR' : row._lastResponse.status_code }}
-                </n-tag>
-              </template>
-              <span v-else class="text-gray-300 text-xs">未测试</span>
-            </td>
-            <td class="!text-right" @click.stop>
-              <n-button size="tiny" quaternary circle title="上移" :disabled="i === 0" @click="moveRequest(i, -1)">
-                <template #icon><n-icon><ArrowUpOutline /></n-icon></template>
-              </n-button>
-              <n-button
-                size="tiny"
-                quaternary
-                circle
-                title="下移"
-                :disabled="i === template.requests.length - 1"
-                @click="moveRequest(i, 1)"
+      <div v-else class="grid grid-cols-1 gap-3 lg:grid-cols-[15rem_minmax(0,1fr)]">
+        <aside class="space-y-3">
+          <div class="overflow-hidden rounded border border-gray-200 dark:border-gray-700">
+            <button
+              v-for="filter in requestScopeFilters"
+              :key="filter.key"
+              type="button"
+              class="flex h-10 w-full items-center justify-between border-b border-gray-200 px-3 text-left text-sm last:border-b-0 dark:border-gray-700"
+              :class="requestScope === filter.key ? 'bg-sky-600 text-white' : 'bg-white hover:bg-gray-50 dark:bg-gray-900 dark:hover:bg-gray-800'"
+              @click="requestScope = filter.key"
+            >
+              <span class="truncate">{{ filter.label }}</span>
+              <span class="ml-2 min-w-6 rounded-full px-1.5 py-0.5 text-center text-xs" :class="requestScope === filter.key ? 'bg-white text-sky-700' : 'bg-gray-500 text-white'">
+                {{ filter.count }}
+              </span>
+            </button>
+          </div>
+
+          <div class="overflow-hidden rounded border border-gray-200 dark:border-gray-700">
+            <button
+              v-for="filter in requestResourceFilters"
+              :key="filter.key"
+              type="button"
+              class="flex h-9 w-full items-center justify-between border-b border-gray-200 px-3 text-left text-sm last:border-b-0 dark:border-gray-700"
+              :class="requestCategory === filter.key ? 'bg-sky-600 text-white' : 'bg-white hover:bg-gray-50 dark:bg-gray-900 dark:hover:bg-gray-800'"
+              @click="requestCategory = filter.key"
+            >
+              <span>{{ filter.label }}</span>
+              <span class="ml-2 min-w-6 rounded-full px-1.5 py-0.5 text-center text-xs" :class="requestCategory === filter.key ? 'bg-white text-sky-700' : 'bg-gray-500 text-white'">
+                {{ filter.count }}
+              </span>
+            </button>
+          </div>
+
+          <div class="overflow-hidden rounded border border-gray-200 dark:border-gray-700">
+            <button
+              v-for="filter in requestSignalFilters"
+              :key="filter.key"
+              type="button"
+              class="flex h-9 w-full items-center justify-between border-b border-gray-200 px-3 text-left text-sm last:border-b-0 dark:border-gray-700"
+              :class="requestCategory === filter.key ? 'bg-sky-600 text-white' : 'bg-white hover:bg-gray-50 dark:bg-gray-900 dark:hover:bg-gray-800'"
+              @click="requestCategory = filter.key"
+            >
+              <span class="truncate">{{ filter.label }}</span>
+              <span class="ml-2 min-w-6 rounded-full px-1.5 py-0.5 text-center text-xs" :class="requestCategory === filter.key ? 'bg-white text-sky-700' : 'bg-gray-500 text-white'">
+                {{ filter.count }}
+              </span>
+            </button>
+          </div>
+
+          <n-button block type="primary" secondary :disabled="requestFilterCount('recommended') === 0" @click="applyRecommendedRequests">
+            应用推荐选择
+          </n-button>
+        </aside>
+
+        <div class="min-w-0 overflow-x-auto">
+          <n-empty v-if="filteredRequests.length === 0" description="当前分类没有请求" size="small" class="py-10" />
+          <n-table v-else size="small" :bordered="false" class="min-w-[52rem]">
+            <thead>
+              <tr>
+                <th class="w-8">
+                  <n-checkbox
+                    :checked="allRequestsChecked"
+                    :indeterminate="enabledRequestCount > 0 && !allRequestsChecked"
+                    aria-label="启用全部请求"
+                    @update:checked="toggleAllRequests"
+                  />
+                </th>
+                <th class="w-10">#</th>
+                <th class="w-20">方法</th>
+                <th>URL</th>
+                <th class="w-28">备注</th>
+                <th class="w-24">状态</th>
+                <th class="w-64 !text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="({ request: row, index: i }) in filteredRequests"
+                :key="i"
+                class="cursor-pointer"
+                :class="{ 'opacity-55': !row.checked }"
+                @click="openDetail(row, i)"
               >
-                <template #icon><n-icon><ArrowDownOutline /></n-icon></template>
-              </n-button>
-              <n-button size="tiny" quaternary circle title="复制" @click="copyRequest(row)">
-                <template #icon><n-icon><CopyOutline /></n-icon></template>
-              </n-button>
-              <n-button
-                size="tiny"
-                quaternary
-                circle
-                title="粘贴到后面"
-                :disabled="!requestClipboard"
-                @click="pasteRequest(i)"
-              >
-                <template #icon><n-icon><ClipboardOutline /></n-icon></template>
-              </n-button>
-              <n-button size="tiny" quaternary type="primary" :loading="row._testing" @click="testRequest(row)">
-                测试
-              </n-button>
-              <n-button size="tiny" quaternary type="error" @click="removeRequest(i)">删除</n-button>
-            </td>
-          </tr>
-        </tbody>
-      </n-table>
+                <td @click.stop>
+                  <n-checkbox v-model:checked="row.checked" :aria-label="`执行请求 ${i + 1}`" />
+                </td>
+                <td>{{ i + 1 }}</td>
+                <td>
+                  <n-tag :type="methodType(row.method)" size="tiny" round>{{ row.method }}</n-tag>
+                </td>
+                <td class="max-w-96">
+                  <div class="flex min-w-0 flex-wrap items-center gap-1">
+                    <span v-if="requestIsRecommended(row)" class="text-sky-600" title="推荐关联请求">◆</span>
+                    <span class="min-w-24 flex-1 truncate font-mono text-xs" :title="row.url">{{ row.url || '(未设置)' }}</span>
+                    <n-tag
+                      v-for="name in requestVariableNames(row)"
+                      :key="name"
+                      size="tiny"
+                      type="info"
+                      :bordered="false"
+                    >
+                      {{ formatVariableName(name) }}
+                    </n-tag>
+                  </div>
+                </td>
+                <td class="text-xs text-gray-400 truncate">{{ row._comment || '-' }}</td>
+                <td>
+                  <template v-if="row._lastResponse">
+                    <n-tag
+                      :type="row._lastResponse.error ? 'error' : row._lastResponse.status_code < 300 ? 'success' : 'warning'"
+                      size="tiny"
+                    >
+                      {{ row._lastResponse.error ? 'ERR' : row._lastResponse.status_code }}
+                    </n-tag>
+                  </template>
+                  <span v-else class="text-gray-300 text-xs">未测试</span>
+                </td>
+                <td class="!text-right" @click.stop>
+                  <n-button size="tiny" quaternary circle title="上移" :disabled="i === 0" @click="moveRequest(i, -1)">
+                    <template #icon><n-icon><ArrowUpOutline /></n-icon></template>
+                  </n-button>
+                  <n-button
+                    size="tiny"
+                    quaternary
+                    circle
+                    title="下移"
+                    :disabled="i === template.requests.length - 1"
+                    @click="moveRequest(i, 1)"
+                  >
+                    <template #icon><n-icon><ArrowDownOutline /></n-icon></template>
+                  </n-button>
+                  <n-button size="tiny" quaternary circle title="复制" @click="copyRequest(row)">
+                    <template #icon><n-icon><CopyOutline /></n-icon></template>
+                  </n-button>
+                  <n-button
+                    size="tiny"
+                    quaternary
+                    circle
+                    title="粘贴到后面"
+                    :disabled="!requestClipboard"
+                    @click="pasteRequest(i)"
+                  >
+                    <template #icon><n-icon><ClipboardOutline /></n-icon></template>
+                  </n-button>
+                  <n-button size="tiny" quaternary type="primary" :loading="row._testing" @click="testRequest(row)">
+                    测试
+                  </n-button>
+                  <n-button size="tiny" quaternary type="error" @click="removeRequest(i)">删除</n-button>
+                </td>
+              </tr>
+            </tbody>
+          </n-table>
+        </div>
+      </div>
     </n-card>
 
     <!-- Detail modal -->
     <n-modal
       v-model:show="showDetail"
       preset="card"
-      :title="detailRequest ? `${detailRequest.method} ${detailRequest.url || '(新请求)'}` : ''"
-      class="max-w-5xl"
-      :style="{ width: '94vw' }"
+      :title="detailRequest ? `编辑请求 #${(activeRequestIndex ?? 0) + 1}` : ''"
+      class="request-detail-modal max-w-6xl"
+      :style="{ width: '97vw' }"
     >
-      <div v-if="detailRequest">
-        <div class="flex items-center gap-2 mb-3">
-          <span class="text-sm text-gray-400 whitespace-nowrap">备注:</span>
+      <div v-if="detailRequest" class="request-detail-compact">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="text-sm text-gray-500 whitespace-nowrap dark:text-gray-300">备注:</span>
           <n-input v-model:value="detailRequest._comment" size="small" placeholder="请求备注" class="max-w-md" />
           <div class="flex-1" />
           <n-button size="small" type="primary" :loading="detailRequest._testing" @click="testRequest(detailRequest)">
@@ -909,29 +1357,88 @@ const extractorSourceOptions = [
         <n-tabs v-model:value="detailTab" type="line" size="small">
           <!-- Request -->
           <n-tab-pane name="request" tab="请求">
-            <div class="flex gap-2 mb-3">
+            <div class="flex gap-1 mb-2">
               <n-select
                 :value="detailRequest.method"
                 :options="methodOptions"
-                class="w-28"
                 size="small"
+                :style="{ width: '5.5rem', flex: '0 0 5.5rem' }"
                 @update:value="handleMethodChange(detailRequest!, $event)"
               />
-              <n-input v-model:value="detailRequest.url" size="small" placeholder="https://example.com/api（支持 {{var}}）" />
+              <TemplateTextInput
+                :model-value="detailRequest.url"
+                compact
+                placeholder="https://example.com/api（支持 {{var}}）"
+                @update:model-value="handleRequestUrlChange(detailRequest!, $event)"
+              />
             </div>
-            <div class="flex justify-between items-center mb-1">
+            <div class="flex h-7 justify-between items-center">
+              <span class="text-sm font-medium">Query String Parameters</span>
+              <n-button size="tiny" @click="addQueryParam(detailRequest!)">+ Add</n-button>
+            </div>
+            <div
+              v-for="(query, idx) in detailRequest._queryParams"
+              :key="idx"
+              class="grid grid-cols-1 sm:grid-cols-[minmax(10rem,0.8fr)_minmax(16rem,1.6fr)_auto] items-center gap-x-1 gap-y-0.5 mb-0.5"
+            >
+              <TemplateTextInput
+                :model-value="query.name"
+                compact
+                placeholder="参数名"
+                @update:model-value="updateQueryParam(detailRequest!, idx, 'name', $event)"
+              />
+              <TemplateTextInput
+                :model-value="query.value"
+                compact
+                placeholder="参数值（变量会自动 urlencode）"
+                @update:model-value="updateQueryParam(detailRequest!, idx, 'value', $event)"
+              />
+              <n-button size="tiny" quaternary type="error" @click="removeQueryParam(detailRequest!, idx)">✕</n-button>
+            </div>
+            <div class="flex h-7 justify-between items-center border-t border-gray-100 mt-1.5 dark:border-gray-800">
               <span class="text-sm font-medium">Request Headers</span>
               <n-button size="tiny" @click="addHeader(detailRequest!)">+ Add</n-button>
             </div>
-            <div v-for="(h, idx) in detailRequest.headers" :key="idx" class="flex gap-2 mb-1">
-              <n-input v-model:value="h.name" size="small" placeholder="Header-Name" class="w-56" />
-              <n-input v-model:value="h.value" size="small" placeholder="value (支持 {{var}})" />
+            <div
+              v-for="(h, idx) in detailRequest.headers"
+              :key="idx"
+              class="grid grid-cols-1 sm:grid-cols-[auto_minmax(10rem,0.7fr)_minmax(16rem,1.4fr)_auto] items-center gap-x-1 gap-y-0.5 mb-0.5"
+              :class="{ 'opacity-55': h.checked === false }"
+            >
+              <n-checkbox
+                v-model:checked="h.checked"
+                :disabled="isForbiddenRequestHeader(h.name)"
+                :aria-label="`启用 Header ${h.name || idx + 1}`"
+              />
+              <n-input
+                :value="h.name"
+                size="tiny"
+                placeholder="Header-Name"
+                class="min-w-0"
+                @update:value="updateHeaderName(h, $event)"
+              />
+              <TemplateTextInput v-model="h.value" compact placeholder="value (支持 {{var}})" />
               <n-button size="tiny" quaternary type="error" @click="removeHeader(detailRequest!, idx)">✕</n-button>
             </div>
-            <div class="mt-3">
+            <div class="flex h-8 justify-between items-center border-t border-gray-100 mt-2 dark:border-gray-800">
+              <span class="text-sm font-medium">Request Cookies</span>
+              <n-button size="tiny" @click="addCookie(detailRequest!)">+ Add</n-button>
+            </div>
+            <div
+              v-for="(cookie, idx) in detailRequest.cookies"
+              :key="idx"
+              class="grid grid-cols-1 sm:grid-cols-[minmax(8rem,1fr)_minmax(12rem,2fr)_minmax(8rem,1fr)_6rem_auto] gap-1 mb-1"
+            >
+              <n-input v-model:value="cookie.name" size="small" placeholder="Name" />
+              <TemplateTextInput v-model="cookie.value" compact placeholder="Value (支持 {{var}})" />
+              <n-input v-model:value="cookie.domain" size="small" placeholder="Domain" />
+              <n-input v-model:value="cookie.path" size="small" placeholder="Path" />
+              <n-button size="tiny" quaternary type="error" @click="removeCookie(detailRequest!, idx)">✕</n-button>
+            </div>
+            <div class="border-t border-gray-100 mt-2 pt-2 dark:border-gray-800">
               <span class="text-sm font-medium mr-2">Request Body</span>
               <n-select
-                v-model:value="detailRequest._bodyType"
+                :value="detailRequest._bodyType"
                 size="small"
                 class="w-28 inline-block"
                 :options="[
@@ -940,13 +1447,14 @@ const extractorSourceOptions = [
                   { label: 'Form', value: 'form' },
                   { label: 'Raw', value: 'text' },
                 ]"
+                @update:value="handleBodyTypeChange(detailRequest!, $event)"
               />
-              <n-input
+              <TemplateTextInput
                 v-if="detailRequest._bodyType !== 'none'"
-                v-model:value="detailRequest._bodyContent"
-                type="textarea"
+                v-model="detailRequest._bodyContent"
+                multiline
                 :rows="6"
-                class="mt-2 font-mono"
+                class="mt-2"
                 placeholder='{"key": "value"}'
               />
             </div>
@@ -1032,9 +1540,9 @@ const extractorSourceOptions = [
                 <n-button size="tiny" quaternary type="error" @click="removeExtractor(detailRequest!, eIdx)">✕</n-button>
                 <span
                   class="md:col-span-4 text-xs text-gray-600 dark:text-gray-300 font-mono whitespace-pre-wrap break-all max-h-32 overflow-auto border-t border-blue-100 dark:border-blue-900 pt-2"
-                  :title="String(detailRequest._lastResponse ? extractValue(detailRequest._lastResponse, ext.value, ext.source, ext.headerName) ?? '-' : '-')"
+                  :title="String(detailRequest._lastResponse ? extractedValue(detailRequest._lastResponse, ext.key) ?? '-' : '-')"
                 >
-                  → {{ detailRequest._lastResponse ? extractValue(detailRequest._lastResponse, ext.value, ext.source, ext.headerName) ?? '-' : '-' }}
+                  → {{ detailRequest._lastResponse ? extractedValue(detailRequest._lastResponse, ext.key) ?? '-' : '-' }}
                 </span>
               </div>
             </div>
@@ -1122,3 +1630,13 @@ const extractorSourceOptions = [
     </n-modal>
   </div>
 </template>
+
+<style scoped>
+.request-detail-compact {
+  color: rgb(31 41 55);
+}
+
+:global(html.dark .request-detail-compact) {
+  color: rgb(243 244 246);
+}
+</style>

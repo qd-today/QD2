@@ -59,6 +59,14 @@ def utf8(value):
     return value
 
 
+def ltrim(value):
+    return to_text(value).lstrip()
+
+
+def rtrim(value):
+    return to_text(value).rstrip()
+
+
 def conver2unicode(value, html_unescape=False):
     if not isinstance(value, str):
         try:
@@ -462,6 +470,8 @@ jinja_globals = {
     "unicode": conver2unicode,
     "urlencode": urlencode_with_encoding,
     "quote_chinese": quote_chinese,
+    "ltrim": ltrim,
+    "rtrim": rtrim,
     # binascii
     "b2a_hex": b2a_hex,
     "a2b_hex": a2b_hex,
@@ -518,6 +528,7 @@ jinja_globals = {
 
 jinja_inner_globals = {
     "dict": dict,
+    "list": list,
     "lipsum": generate_lorem_ipsum,
     "range": range,
 }

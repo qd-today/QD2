@@ -1,15 +1,17 @@
 """Scheduler compatibility and notification isolation tests."""
 
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 import qd_server.models  # noqa: F401 - register all tables
+from qd_server.config import QDServerSettings
 from qd_server.models.notification import Notification
 from qd_server.models.task import Task, TaskRun
 from qd_server.models.template import Template
 from qd_server.models.user import User
-from qd_server.services.scheduler import QDScheduler
+from qd_server.services.scheduler import QDScheduler, _format_task_failure
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -26,6 +28,47 @@ class SchedulerCapture:
         self.job = (func, kwargs)
 
 
+def test_max_concurrent_tasks_can_be_configured_from_environment(monkeypatch):
+    monkeypatch.delenv("QD_MAX_CONCURRENT_TASKS", raising=False)
+    assert QDServerSettings(_env_file=None).max_concurrent_tasks == 5
+
+    monkeypatch.setenv("QD_MAX_CONCURRENT_TASKS", "9")
+    assert QDServerSettings(_env_file=None).max_concurrent_tasks == 9
+
+
+@pytest.mark.asyncio
+async def test_task_execution_respects_global_concurrency_limit(monkeypatch):
+    service = QDScheduler(max_concurrent_tasks=2)
+    active = 0
+    peak = 0
+    limit_reached = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_execute(task_id, manual=False):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active == 2:
+            limit_reached.set()
+        try:
+            await release.wait()
+            return task_id, manual
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(service, "_execute_task_impl", fake_execute)
+    runs = [asyncio.create_task(service._execute_task(task_id)) for task_id in range(5)]
+
+    await asyncio.wait_for(limit_reached.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert active == 2
+    assert peak == 2
+
+    release.set()
+    assert await asyncio.gather(*runs) == [(task_id, False) for task_id in range(5)]
+    assert peak == 2
+
+
 def test_daily_schedule_preserves_seconds():
     service = QDScheduler()
     capture = SchedulerCapture()
@@ -40,6 +83,25 @@ def test_daily_schedule_preserves_seconds():
     assert (next_run.hour, next_run.minute, next_run.second) == (8, 30, 15)
 
 
+def test_daily_schedule_preserves_start_date():
+    service = QDScheduler()
+    capture = SchedulerCapture()
+    service.scheduler = capture
+    task = SimpleNamespace(
+        id=8,
+        schedule_config={
+            "schedule_type": "daily",
+            "run_time": "00:50:10",
+            "start_date": "2026-08-25",
+        },
+    )
+
+    service._add_job(task)
+
+    trigger = capture.job[1]["trigger"]
+    assert trigger.start_date.date().isoformat() == "2026-08-25"
+
+
 def test_next_run_time_reads_registered_job():
     expected = datetime(2026, 3, 4, 5, 6, 7)
     service = QDScheduler()
@@ -51,6 +113,30 @@ def test_next_run_time_reads_registered_job():
 
     assert service.get_next_run_time(7) == expected
     assert service.get_next_run_time(8) is None
+
+
+def test_failure_log_matches_qd_v1_format():
+    message = _format_task_failure(
+        [
+            {
+                "status": "failed",
+                "success": False,
+                "message": (
+                    'Fail assert: {"re": "200", "from": "status"} from success_asserts,'
+                    "Response Error : HTTP 403: Forbidden"
+                ),
+                "url": "https://example.test/account",
+            }
+        ],
+        2,
+        "login required",
+    )
+
+    assert message == (
+        'Failed at 1/2 request,Fail assert: {"re": "200", "from": "status"} '
+        "from success_asserts,Response Error : HTTP 403: Forbidden,"
+        "Request URL: https://example.test/account"
+    )
 
 
 @pytest.mark.asyncio
@@ -71,9 +157,61 @@ async def test_notifications_are_scoped_to_user_and_task(monkeypatch):
         session.add(Notification(user_id=1, task_id=11, name="other-task", notification_type="webhook"))
         session.add(Notification(user_id=2, task_id=None, name="other-user", notification_type="webhook"))
         await session.commit()
-        await QDScheduler()._send_notifications(session, 10, 1, "task", "success")
+        await QDScheduler()._send_notifications(
+            session, 10, 1, "task", "success", task_log="signed in"
+        )
 
     assert len(sent) == 2
+    assert all(call["task_log"] == "signed in" for call in sent)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_notification_switches_and_failure_threshold(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    sent = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+
+    monkeypatch.setattr("qd_server.services.notification.send_notification", fake_send)
+    async with factory() as session:
+        session.add(
+            Notification(
+                user_id=1,
+                name="threshold",
+                notification_type="webhook",
+                config={"failure_threshold": 3},
+            )
+        )
+        session.add(TaskRun(task_id=10, user_id=1, status="failed"))
+        session.add(TaskRun(task_id=10, user_id=1, status="failed"))
+        await session.commit()
+
+        service = QDScheduler()
+        await service._send_notifications(session, 10, 1, "task", "failed", "second")
+        assert sent == []
+
+        session.add(TaskRun(task_id=10, user_id=1, status="failed"))
+        await session.commit()
+        await service._send_notifications(session, 10, 1, "task", "failed", "third")
+        assert len(sent) == 1
+        assert sent[0]["error_message"] == "third"
+
+        await service._send_notifications(
+            session,
+            10,
+            1,
+            "task",
+            "failed",
+            "disabled",
+            execution_config={"notify_on_failure": False},
+        )
+        assert len(sent) == 1
+
     await engine.dispose()
 
 
@@ -229,5 +367,73 @@ async def test_execution_publishes_and_persists_extracted_task_log(monkeypatch):
         stored = (await session.execute(select(TaskRun))).scalar_one()
         assert stored.response_summary == "first line\nsecond line"
         assert stored.extracted_variables == {"__log__": "first line\nsecond line"}
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execution_persists_simple_failed_request_log(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with factory() as session:
+        user = User(username="failed-log-user", hashed_password="x")
+        session.add(user)
+        await session.flush()
+        template = Template(
+            user_id=user.id,
+            name="failed-log-template",
+            template_data={"name": "failed-log-template", "requests": [{"url": "https://example.test/account"}]},
+        )
+        session.add(template)
+        await session.flush()
+        task = Task(user_id=user.id, template_id=template.id, name="failed-log-task")
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+
+    class FakeFetcher:
+        def __init__(self, cookie_session, proxy=None, api_base_url=None):
+            self.session = cookie_session
+
+        async def execute_template(self, _template):
+            return [
+                {
+                    "status": "failed",
+                    "success": False,
+                    "message": "Fail assert: login required",
+                    "status_code": 403,
+                    "method": "GET",
+                    "url": "https://example.test/account",
+                    "content": '{"error":"not logged in"}',
+                    "request_index": 0,
+                    "extracted_variables": {"__log__": "login check failed"},
+                }
+            ]
+
+    settings = SimpleNamespace(db=SimpleNamespace(scoped_session=factory))
+    monkeypatch.setattr("qd_server.config.get_settings", lambda: settings)
+    monkeypatch.setattr("qd_core.client.fetcher.QDFetcher", FakeFetcher)
+    service = QDScheduler()
+
+    async def skip_notifications(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_send_notifications", skip_notifications)
+    run = await service._execute_task(task.id, manual=True)
+
+    assert run.status == "failed"
+    assert run.error_message == (
+        "Failed at 1/1 request,Fail assert: login required,"
+        "Request URL: https://example.test/account"
+    )
+    assert run.response_summary is None
+
+    async with factory() as session:
+        stored = (await session.execute(select(TaskRun))).scalar_one()
+        assert stored.error_message == run.error_message
+        assert stored.response_summary is None
 
     await engine.dispose()

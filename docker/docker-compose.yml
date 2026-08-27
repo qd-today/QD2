@@ -1,0 +1,26 @@
+services:
+  qd2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ${DOCKER_IMAGE:-ghcr.io/qd-today/qd2:latest}
+    container_name: qd2
+    env_file:
+      - .env
+    ports:
+      - "${QD_PORT:-8923}:${QD_PORT:-8923}"
+    volumes:
+      - qd2-data:/root/.qd2
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; urllib.request.urlopen('http://localhost:' + os.getenv('QD_PORT', '8923') + '/health')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  qd2-data:

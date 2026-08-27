@@ -65,6 +65,7 @@ async def test_wecom_app_gets_token_and_sends_message():
         task_name="签到",
         status="success",
         duration_seconds=1.5,
+        task_log="签到成功",
     )
 
     assert ok is True
@@ -80,7 +81,10 @@ async def test_wecom_app_gets_token_and_sends_message():
     assert kwargs["params"] == {"access_token": "access-secret"}
     assert kwargs["json"]["agentid"] == 1000002
     assert kwargs["json"]["touser"] == "user1|user2"
-    assert "签到" in kwargs["json"]["text"]["content"]
+    content = kwargs["json"]["text"]["content"]
+    assert "签到" in content
+    assert "日志: 签到成功" in content
+    assert "耗时" not in content
 
 
 @pytest.mark.asyncio

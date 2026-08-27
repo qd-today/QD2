@@ -12,8 +12,21 @@ from qd_server.middleware.auth import get_current_user, get_session
 from qd_server.models.notification import Notification
 from qd_server.models.task import Task
 from qd_server.models.user import User
+from qd_server.services.encryption import protect_dict, unprotect_dict
 
 router = APIRouter()
+
+
+def _normalize_notification_config(config: dict) -> dict:
+    normalized = dict(config or {})
+    try:
+        failure_threshold = int(normalized.get("failure_threshold", 1) or 1)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid failure_threshold") from exc
+    if not 1 <= failure_threshold <= 100:
+        raise HTTPException(status_code=422, detail="failure_threshold is out of range")
+    normalized["failure_threshold"] = failure_threshold
+    return normalized
 
 
 class NotificationCreate(BaseModel):
@@ -65,7 +78,7 @@ async def list_notifications(
             name=n.name,
             notification_type=n.notification_type,
             enabled=n.enabled,
-            config=n.config,
+            config=unprotect_dict(n.config, "notification.config"),
             task_id=n.task_id,
             on_success=n.on_success,
             on_failure=n.on_failure,
@@ -96,7 +109,10 @@ async def create_notification(
         user_id=current_user.id,
         name=request.name,
         notification_type=request.notification_type,
-        config=request.config,
+        config=protect_dict(
+            _normalize_notification_config(request.config),
+            "notification.config",
+        ),
         task_id=request.task_id,
         on_success=request.on_success,
         on_failure=request.on_failure,
@@ -110,7 +126,7 @@ async def create_notification(
         name=notification.name,
         notification_type=notification.notification_type,
         enabled=notification.enabled,
-        config=notification.config,
+        config=unprotect_dict(notification.config, "notification.config"),
         task_id=notification.task_id,
         on_success=notification.on_success,
         on_failure=notification.on_failure,
@@ -138,6 +154,11 @@ async def update_notification(
         raise HTTPException(status_code=404, detail="Notification not found")
 
     update_data = request.model_dump(exclude_unset=True)
+    if "config" in update_data:
+        update_data["config"] = protect_dict(
+            _normalize_notification_config(update_data["config"]),
+            "notification.config",
+        )
     for key, value in update_data.items():
         setattr(notification, key, value)
 
@@ -150,7 +171,7 @@ async def update_notification(
         name=notification.name,
         notification_type=notification.notification_type,
         enabled=notification.enabled,
-        config=notification.config,
+        config=unprotect_dict(notification.config, "notification.config"),
         task_id=notification.task_id,
         on_success=notification.on_success,
         on_failure=notification.on_failure,
@@ -186,10 +207,20 @@ CHANNEL_SCHEMAS = {
     "webhook": {"label": "Webhook", "fields": ["url", "method", "headers"]},
     "email": {
         "label": "邮件 (SMTP)",
-        "fields": ["smtp_host", "smtp_port", "smtp_user", "smtp_password", "from_addr", "to_addr", "use_tls"],
+        "fields": [
+            "smtp_host",
+            "smtp_port",
+            "smtp_user",
+            "smtp_password",
+            "from_addr",
+            "to_addr",
+            "use_ssl",
+            "use_starttls",
+        ],
     },
     "bark": {"label": "Bark (iOS)", "fields": ["server", "device_key", "group", "sound"]},
     "serverchan": {"label": "Server酱 Turbo", "fields": ["sendkey"]},
+    "wxpusher": {"label": "Wxpusher", "fields": ["app_token", "uids"]},
     "telegram": {"label": "Telegram Bot", "fields": ["bot_token", "chat_id", "api_host"]},
     "pushdeer": {"label": "PushDeer", "fields": ["pushkey", "server"]},
     "gotify": {"label": "Gotify", "fields": ["server", "token", "priority"]},
@@ -228,7 +259,7 @@ async def test_notification(
     if notification is None:
         raise HTTPException(status_code=404, detail="Notification not found")
 
-    config = dict(notification.config or {})
+    config = unprotect_dict(notification.config, "notification.config")
     config["type"] = notification.notification_type
 
     ok = await send_notification(
@@ -236,7 +267,7 @@ async def test_notification(
         task_name="测试通知",
         status="success",
         error_message=None,
-        duration_seconds=0.5,
+        task_log="这是一条测试日志",
     )
 
     return {"sent": ok, "channel": notification.notification_type}

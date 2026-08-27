@@ -1,0 +1,96 @@
+name: Docker Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: GHCR 镜像标签
+        required: true
+        default: manual
+        type: string
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish-image:
+    name: Publish multi-platform image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve image name
+        id: image
+        shell: bash
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=${{ github.event.inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish-source:
+    name: Publish source archives
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: publish-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Package source
+        id: archive
+        shell: bash
+        run: |
+          safe_tag="${GITHUB_REF_NAME//\//-}"
+          repository="${GITHUB_REPOSITORY#*/}"
+          archive_base="${repository}-${safe_tag}"
+          git archive --format=tar.gz --prefix="${archive_base}/" --output="${archive_base}.tar.gz" "$GITHUB_SHA"
+          git archive --format=zip --prefix="${archive_base}/" --output="${archive_base}.zip" "$GITHUB_SHA"
+          echo "archive_base=${archive_base}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ steps.archive.outputs.archive_base }}.tar.gz
+            ${{ steps.archive.outputs.archive_base }}.zip

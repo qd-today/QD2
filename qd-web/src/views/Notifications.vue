@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 import { useMessage, useDialog } from 'naive-ui'
 import api from '@/api'
 
@@ -20,7 +20,7 @@ const form = reactive({
   enabled: true,
   on_success: true,
   on_failure: true,
-  config: {} as Record<string, any>,
+  config: { failure_threshold: 1 } as Record<string, any>,
 })
 
 // 字段中文标签
@@ -34,12 +34,15 @@ const FIELD_LABELS: Record<string, string> = {
   smtp_password: 'SMTP 密码',
   from_addr: '发件人',
   to_addr: '收件人',
-  use_tls: '使用 TLS',
+  use_ssl: '使用 SSL/TLS',
+  use_starttls: '使用 STARTTLS',
   server: '服务器地址',
   device_key: 'Device Key',
   group: '分组 (可选)',
   sound: '铃声 (可选)',
   sendkey: 'SendKey',
+  app_token: 'App Token',
+  uids: 'UID（多个用逗号分隔）',
   bot_token: 'Bot Token',
   chat_id: 'Chat ID',
   api_host: 'API 地址 (可选)',
@@ -58,6 +61,15 @@ const FIELD_LABELS: Record<string, string> = {
 onMounted(async () => {
   await Promise.all([fetchNotifications(), fetchChannels()])
 })
+
+watch(
+  () => form.notification_type,
+  (notificationType) => {
+    if (notificationType !== 'email') return
+    if (form.config.use_ssl === undefined) form.config.use_ssl = false
+    if (form.config.use_starttls === undefined) form.config.use_starttls = true
+  },
+)
 
 async function fetchChannels() {
   try {
@@ -91,7 +103,7 @@ function openCreate() {
   form.enabled = true
   form.on_success = true
   form.on_failure = true
-  form.config = {}
+  form.config = { failure_threshold: 1 }
   showDialog.value = true
 }
 
@@ -102,7 +114,13 @@ function openEdit(row: any) {
   form.enabled = row.enabled
   form.on_success = row.on_success
   form.on_failure = row.on_failure
-  form.config = { ...(row.config || {}) }
+  form.config = {
+    ...(row.config || {}),
+    failure_threshold: Number(row.config?.failure_threshold || 1),
+  }
+  if (row.notification_type === 'email' && form.config.use_starttls === undefined) {
+    form.config.use_starttls = form.config.use_tls ?? true
+  }
   showDialog.value = true
 }
 
@@ -117,7 +135,10 @@ async function save() {
     enabled: form.enabled,
     on_success: form.on_success,
     on_failure: form.on_failure,
-    config: form.config,
+    config: {
+      ...form.config,
+      failure_threshold: Number(form.config.failure_threshold || 1),
+    },
   }
   saving.value = true
   try {
@@ -189,6 +210,9 @@ function deleteNotification(id: number) {
                 </n-tag>
                 <n-tag v-if="row.on_success" size="tiny" type="success" round>成功</n-tag>
                 <n-tag v-if="row.on_failure" size="tiny" type="error" round>失败</n-tag>
+                <n-tag v-if="row.on_failure" size="tiny" round>
+                  连续 {{ row.config?.failure_threshold || 1 }} 次
+                </n-tag>
               </div>
             </div>
           </div>
@@ -237,6 +261,17 @@ function deleteNotification(id: number) {
           <n-checkbox v-model:checked="form.on_success">成功时</n-checkbox>
           <n-checkbox v-model:checked="form.on_failure" class="ml-3">失败时</n-checkbox>
         </n-form-item>
+        <n-form-item v-if="form.on_failure" label="失败推送">
+          <span class="text-sm mr-2">连续失败达到</span>
+          <n-input-number
+            v-model:value="form.config.failure_threshold"
+            :min="1"
+            :max="100"
+            :precision="0"
+            class="w-28"
+          />
+          <span class="text-sm ml-2">次后推送</span>
+        </n-form-item>
 
         <n-divider title-placement="left" class="!my-2 !text-xs">渠道配置</n-divider>
         <n-form-item
@@ -244,7 +279,10 @@ function deleteNotification(id: number) {
           :key="field"
           :label="FIELD_LABELS[field] || field"
         >
-          <n-switch v-if="field === 'use_tls'" v-model:value="form.config[field]" />
+          <n-switch
+            v-if="field === 'use_ssl' || field === 'use_starttls'"
+            v-model:value="form.config[field]"
+          />
           <n-input-number
             v-else-if="field === 'smtp_port' || field === 'priority' || field === 'agent_id'"
             v-model:value="form.config[field]"

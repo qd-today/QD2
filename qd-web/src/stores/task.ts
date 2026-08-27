@@ -28,7 +28,13 @@ export const useTaskStore = defineStore('task', () => {
   const total = ref(0)
   const loading = ref(false)
 
-  async function fetchTasks(page = 1, pageSize = 20, status = '') {
+  async function fetchTasks(
+    page = 1,
+    pageSize = 20,
+    status = '',
+    search = '',
+    groupId: number | null = null,
+  ) {
     loading.value = true
     try {
       const params = new URLSearchParams({
@@ -36,6 +42,8 @@ export const useTaskStore = defineStore('task', () => {
         page_size: pageSize.toString(),
       })
       if (status) params.append('status', status)
+      if (search) params.append('search', search)
+      if (groupId !== null) params.append('group_id', groupId.toString())
 
       const response = await api.get(`/api/tasks?${params}`)
       tasks.value = response.data.items

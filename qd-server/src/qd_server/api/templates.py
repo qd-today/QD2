@@ -1,10 +1,12 @@
 """Template management API routes."""
 
+from copy import deepcopy
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -54,6 +56,24 @@ class TemplateResponse(BaseModel):
 
 class TemplateListResponse(BaseModel):
     items: list[TemplateResponse]
+    total: int
+
+
+class PublishedTemplateResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+    author: Optional[str]
+    version: str
+    tags: list
+    owner: str
+    owned: bool
+    installed: bool
+    updated_at: datetime
+
+
+class PublishedTemplateListResponse(BaseModel):
+    items: list[PublishedTemplateResponse]
     total: int
 
 
@@ -128,6 +148,156 @@ async def list_templates(
             for t in templates
         ],
         total=total,
+    )
+
+
+@router.get("/published", response_model=PublishedTemplateListResponse)
+async def list_published_templates(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """List enabled templates explicitly published by all users."""
+    filters = [Template.is_public, Template.enabled, User.is_active]
+    if search and search.strip():
+        term = search.strip()
+        filters.append(
+            or_(
+                col(Template.name).contains(term),
+                col(Template.description).contains(term),
+                col(Template.author).contains(term),
+                col(User.username).contains(term),
+            )
+        )
+
+    result = await session.execute(
+        select(Template, User.username)
+        .join(User, User.id == Template.user_id)
+        .where(*filters)
+        .order_by(col(Template.updated_at).desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    rows = result.all()
+    total = (
+        await session.execute(
+            select(func.count())
+            .select_from(Template)
+            .join(User, User.id == Template.user_id)
+            .where(*filters)
+        )
+    ).scalar_one()
+
+    owned_tags = (
+        await session.execute(select(Template.tags).where(Template.user_id == current_user.id))
+    ).scalars().all()
+    installed_source_ids = {
+        int(tag.removeprefix("published-source:"))
+        for tags in owned_tags
+        for tag in (tags or [])
+        if isinstance(tag, str)
+        and tag.startswith("published-source:")
+        and tag.removeprefix("published-source:").isdigit()
+    }
+
+    return PublishedTemplateListResponse(
+        items=[
+            PublishedTemplateResponse(
+                id=template.id,
+                name=template.name,
+                description=template.description,
+                author=template.author,
+                version=template.version,
+                tags=template.tags,
+                owner=owner,
+                owned=template.user_id == current_user.id,
+                installed=(
+                    template.user_id == current_user.id
+                    or template.id in installed_source_ids
+                ),
+                updated_at=template.updated_at,
+            )
+            for template, owner in rows
+        ],
+        total=total,
+    )
+
+
+@router.post(
+    "/published/{template_id}/install",
+    response_model=TemplateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def install_published_template(
+    template_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Install a private copy of another user's published template."""
+    result = await session.execute(
+        select(Template)
+        .join(User, User.id == Template.user_id)
+        .where(
+            Template.id == template_id,
+            Template.is_public,
+            Template.enabled,
+            User.is_active,
+        )
+    )
+    source = result.scalar_one_or_none()
+    if source is None:
+        raise HTTPException(status_code=404, detail="Published template not found")
+    if source.user_id == current_user.id:
+        raise HTTPException(status_code=409, detail="This template already belongs to you")
+
+    marker = f"published-source:{source.id}"
+    existing_tags = (
+        await session.execute(select(Template.tags).where(Template.user_id == current_user.id))
+    ).scalars().all()
+    if any(marker in (tags or []) for tags in existing_tags):
+        raise HTTPException(status_code=409, detail="Published template already installed")
+
+    now = datetime.utcnow()
+    template = Template(
+        user_id=current_user.id,
+        name=source.name,
+        description=source.description,
+        author=source.author,
+        version=source.version,
+        template_data=deepcopy(source.template_data),
+        variables=deepcopy(source.variables),
+        tags=[
+            *[
+                tag
+                for tag in (source.tags or [])
+                if not str(tag).startswith("published-source:")
+            ],
+            marker,
+        ],
+        enabled=True,
+        is_public=False,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(template)
+    await session.commit()
+    await session.refresh(template)
+
+    return TemplateResponse(
+        id=template.id,
+        name=template.name,
+        description=template.description,
+        template_data=template.template_data,
+        variables=template.variables,
+        tags=template.tags,
+        is_public=template.is_public,
+        enabled=template.enabled,
+        run_count=template.run_count,
+        created_at=template.created_at,
+        updated_at=template.updated_at,
+        last_success_at=None,
     )
 
 
@@ -385,27 +555,31 @@ async def import_template(
 ):
     """Import a template from QD2 JSON or HAR format."""
     body = await request.json()
+    metadata = body if isinstance(body, dict) else {}
 
     # Detect format
-    if "log" in body and "entries" in body.get("log", {}):
+    if isinstance(body, list):
+        template_data = body
+        name = "Imported"
+    elif "log" in body and "entries" in body.get("log", {}):
         # HAR format
         entries = body["log"]["entries"]
         requests = []
         for entry in entries:
-            har_req = entry.get("request", {})
-            req = {
-                "method": har_req.get("method", "GET"),
-                "url": har_req.get("url", ""),
-                "headers": [
-                    {"name": h["name"], "value": h["value"]}
-                    for h in har_req.get("headers", [])
-                ],
-            }
-            post_data = har_req.get("postData")
-            if post_data:
-                req["postData"] = {
-                    "mimeType": post_data.get("mimeType", "text/plain"),
-                    "text": post_data.get("text", ""),
+            req = dict(entry.get("request", {}))
+            req["checked"] = entry.get("checked", req.get("checked", True))
+            comment = entry.get("comment") or req.get("comment")
+            if comment:
+                req["_comment"] = comment
+            rule = entry.get("rule", {})
+            success_asserts = entry.get("success_asserts", rule.get("success_asserts", []))
+            failed_asserts = entry.get("failed_asserts", rule.get("failed_asserts", []))
+            extract_variables = entry.get("extract_variables", rule.get("extract_variables", []))
+            if success_asserts or failed_asserts or extract_variables:
+                req["rule"] = {
+                    "success_asserts": success_asserts,
+                    "failed_asserts": failed_asserts,
+                    "extract_variables": extract_variables,
                 }
             requests.append(req)
 
@@ -423,10 +597,10 @@ async def import_template(
     template = Template(
         user_id=current_user.id,
         name=name,
-        description=body.get("description", ""),
+        description=metadata.get("description", ""),
         template_data=template_data,
-        variables=body.get("variables", {}),
-        tags=body.get("tags", []),
+        variables=metadata.get("variables", {}),
+        tags=metadata.get("tags", []),
         created_at=now,
         updated_at=now,
     )

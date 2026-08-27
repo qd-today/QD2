@@ -15,7 +15,7 @@ dependencies = [
     "aiomysql>=0.2.0",
     "pyjwt>=2.10.0",
     "passlib[bcrypt]>=1.7.4",
-    "bcrypt<5.0.0",
+    "bcrypt>=4.0.1,<4.1.0",
     "python-multipart>=0.0.17",
     "apscheduler>=3.10.0",
     "u-msgpack-python>=2.8.0",

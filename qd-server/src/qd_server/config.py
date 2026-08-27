@@ -4,12 +4,12 @@ Extends QDCoreSettings with server-specific settings including
 database, JWT authentication, and scheduler configuration.
 """
 
+import os
+import secrets
 from asyncio import current_task
 from enum import Enum
 from functools import cached_property, lru_cache
-import os
 from pathlib import Path
-import secrets
 from typing import Optional, Union, cast
 from urllib.parse import urlparse
 
@@ -73,6 +73,7 @@ class MysqlSettings(QDCoreSettings):
 
 
 DEFAULT_JWT_SECRET = "change-me-in-production"
+DEFAULT_ENCRYPTION_KEY = "binux"
 
 
 class JWTSettings(QDCoreSettings):
@@ -86,6 +87,13 @@ class JWTSettings(QDCoreSettings):
     algorithm: str = Field(default="HS256")
     access_token_expire_minutes: int = Field(default=15, description="Access token TTL in minutes")
     refresh_token_expire_days: int = Field(default=7, description="Refresh token TTL in days")
+
+
+class SMTPSettings(QDCoreSettings):
+    """Global SMTP transport defaults used by email notification channels."""
+
+    ssl: bool = Field(default=False, alias="QD_SMTP_SSL")
+    starttls: bool = Field(default=True, alias="QD_SMTP_STARTTLS")
 
 
 class DBSettings(QDCoreSettings):
@@ -141,11 +149,48 @@ class QDServerSettings(QDCoreSettings):
 
     db: DBSettings = Field(default_factory=DBSettings)
     jwt: JWTSettings = Field(default_factory=JWTSettings)
+    smtp: SMTPSettings = Field(default_factory=SMTPSettings)
 
     # Server
     host: str = Field(default="0.0.0.0")
-    port: int = Field(default=8924)
+    port: int = Field(default=8923)
     reload: bool = Field(default=False)
+    max_concurrent_tasks: int = Field(
+        default=5,
+        ge=1,
+        description="Maximum number of task runs executing concurrently per server process",
+    )
+    task_timeout: int = Field(
+        default=900,
+        ge=1,
+        description="Maximum execution time in seconds for one task run",
+    )
+    encryption_key: str = Field(
+        default=DEFAULT_ENCRYPTION_KEY,
+        description="Key used to encrypt sensitive database fields",
+    )
+    login_rate_limit: int = Field(
+        default=10,
+        ge=0,
+        description="Failed login attempts allowed per username and client IP; 0 disables",
+    )
+    login_rate_limit_window_seconds: int = Field(default=3600, ge=1)
+    public_url: str = Field(
+        default="",
+        description="Externally reachable base URL used in generated links",
+    )
+    ws_ping_interval: int = Field(default=5, ge=1)
+    ws_ping_timeout: int = Field(default=30, ge=1)
+    ws_max_queue_size: int = Field(default=100, ge=1)
+    ws_max_connections: int = Field(default=30, ge=1)
+
+    @field_validator("public_url")
+    @classmethod
+    def validate_public_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if value and urlparse(value).scheme not in {"http", "https"}:
+            raise ValueError("public_url must use http or https")
+        return value
 
 
 def ensure_jwt_secret(settings: QDServerSettings) -> None:
@@ -166,6 +211,12 @@ def ensure_jwt_secret(settings: QDServerSettings) -> None:
     if len(secret) < 32:
         raise RuntimeError(f"JWT secret file is invalid: {secret_path}")
     settings.jwt.secret_key = secret
+
+
+def ensure_encryption_key(settings: QDServerSettings) -> None:
+    """Apply the fixed default when no explicit encryption key is configured."""
+    if not settings.encryption_key:
+        settings.encryption_key = DEFAULT_ENCRYPTION_KEY
 
 
 @lru_cache

@@ -5,6 +5,7 @@ Supports all channels from original QD plus webhook/email:
 - email (SMTP)
 - bark (iOS push)
 - serverchan (Server酱 Turbo)
+- wxpusher
 - telegram (Bot API)
 - pushdeer
 - gotify
@@ -28,14 +29,13 @@ def _build_title_body(
     status: str,
     error_message: Optional[str],
     duration_seconds: Optional[float],
+    task_log: Optional[str] = None,
 ) -> tuple[str, str]:
     ok = status == "success"
     title = f"[QD2] 任务 {task_name} {'成功 ✅' if ok else '失败 ❌'}"
     body = f"任务: {task_name}\n状态: {'成功' if ok else '失败'}"
-    if duration_seconds is not None:
-        body += f"\n耗时: {duration_seconds:.1f}s"
-    if error_message:
-        body += f"\n错误: {error_message[:500]}"
+    log_message = error_message if not ok and error_message else task_log
+    body += f"\n日志: {str(log_message)[:1000] if log_message not in (None, '') else '-'}"
     return title, body
 
 
@@ -45,6 +45,7 @@ async def send_notification(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """Send a notification based on config['type']."""
     notification_type = notification_config.get("type", "webhook")
@@ -54,6 +55,7 @@ async def send_notification(
         "email": send_email,
         "bark": send_bark,
         "serverchan": send_serverchan,
+        "wxpusher": send_wxpusher,
         "telegram": send_telegram,
         "pushdeer": send_pushdeer,
         "gotify": send_gotify,
@@ -73,6 +75,7 @@ async def send_notification(
         status=status,
         error_message=error_message,
         duration_seconds=duration_seconds,
+        task_log=task_log,
     )
 
 
@@ -108,6 +111,7 @@ async def send_webhook(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """Generic webhook.
 
@@ -127,6 +131,7 @@ async def send_webhook(
         "task_name": task_name,
         "status": status,
         "error_message": error_message,
+        "task_log": task_log if task_log not in (None, "") else error_message,
         "duration_seconds": duration_seconds,
     }
 
@@ -151,13 +156,16 @@ async def send_email(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """SMTP email.
 
     Config: smtp_host (required), smtp_port (587), smtp_user, smtp_password,
-    from_addr, to_addr (required), use_tls (True).
+    from_addr, to_addr (required), use_ssl/use_starttls. ``use_tls`` remains
+    accepted as the legacy alias for ``use_starttls``.
     """
     import smtplib
+    import ssl
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
 
@@ -172,9 +180,26 @@ async def send_email(
     smtp_user = config.get("smtp_user", "")
     smtp_password = config.get("smtp_password", "")
     from_addr = config.get("from_addr", smtp_user)
-    use_tls = config.get("use_tls", True)
+    from qd_server.config import get_settings
 
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    settings = get_settings()
+    smtp_settings = settings.smtp
+    use_ssl = bool(config.get("use_ssl", smtp_settings.ssl))
+    use_starttls = bool(
+        config.get(
+            "use_starttls",
+            config.get("use_tls", smtp_settings.starttls),
+        )
+    )
+    if use_ssl and use_starttls:
+        logger.error("Email configuration cannot enable SSL and STARTTLS together")
+        return False
+
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
+    if settings.public_url:
+        body = f"{body}\n\nQD2: {settings.public_url}"
 
     msg = MIMEMultipart()
     msg["From"] = from_addr
@@ -183,9 +208,10 @@ async def send_email(
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
     try:
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            if use_tls:
-                server.starttls()
+        smtp_client = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+        with smtp_client(smtp_host, smtp_port) as server:
+            if use_starttls:
+                server.starttls(context=ssl.create_default_context())
             if smtp_user and smtp_password:
                 server.login(smtp_user, smtp_password)
             server.sendmail(from_addr, [to_addr], msg.as_string())
@@ -206,6 +232,7 @@ async def send_bark(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """Bark (iOS).
 
@@ -218,7 +245,9 @@ async def send_bark(
         return False
 
     server = (config.get("server") or "https://api.day.app").rstrip("/")
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
 
     payload = {"title": title, "body": body}
     if config.get("group"):
@@ -235,6 +264,7 @@ async def send_serverchan(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """Server酱 Turbo.
 
@@ -245,11 +275,57 @@ async def send_serverchan(
         logger.error("ServerChan sendkey not configured")
         return False
 
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
+    server = "https://sc.ftqq.com" if sendkey.startswith("SCU") else "https://sctapi.ftqq.com"
     return await _post(
-        f"https://sctapi.ftqq.com/{sendkey}.send",
+        f"{server}/{sendkey}.send",
         data={"title": title, "desp": body.replace("\n", "\n\n")},
     )
+
+
+async def send_wxpusher(
+    config: dict,
+    task_name: str,
+    status: str,
+    error_message: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
+) -> bool:
+    """Wxpusher app notification."""
+    app_token = config.get("app_token")
+    raw_uids = config.get("uids")
+    if not app_token or not raw_uids:
+        logger.error("Wxpusher app_token/uids not configured")
+        return False
+    if isinstance(raw_uids, str):
+        uids = [value.strip() for value in raw_uids.replace(";", ",").split(",") if value.strip()]
+    else:
+        uids = [str(value).strip() for value in raw_uids if str(value).strip()]
+    if not uids:
+        return False
+
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.post(
+                "https://wxpusher.zjiecode.com/api/send/message",
+                json={
+                    "appToken": app_token,
+                    "summary": title,
+                    "content": body,
+                    "contentType": 1,
+                    "uids": uids,
+                },
+            )
+            response.raise_for_status()
+            return response.json().get("code") in (0, 1000)
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.error("Wxpusher request failed: %s", type(exc).__name__)
+        return False
 
 
 async def send_telegram(
@@ -258,6 +334,7 @@ async def send_telegram(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """Telegram Bot.
 
@@ -271,7 +348,9 @@ async def send_telegram(
         return False
 
     api_host = (config.get("api_host") or "https://api.telegram.org").rstrip("/")
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
 
     return await _post(
         f"{api_host}/bot{bot_token}/sendMessage",
@@ -285,6 +364,7 @@ async def send_pushdeer(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """PushDeer.
 
@@ -296,7 +376,9 @@ async def send_pushdeer(
         return False
 
     server = (config.get("server") or "https://api2.pushdeer.com").rstrip("/")
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
 
     return await _post(
         f"{server}/message/push",
@@ -310,6 +392,7 @@ async def send_gotify(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """Gotify.
 
@@ -322,7 +405,9 @@ async def send_gotify(
         logger.error("Gotify server/token not configured")
         return False
 
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
     return await _post(
         f"{server.rstrip('/')}/message?token={token}",
         json={"title": title, "message": body, "priority": int(config.get("priority", 5))},
@@ -335,6 +420,7 @@ async def send_dingtalk(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """钉钉群机器人 (custom robot webhook).
 
@@ -364,7 +450,9 @@ async def send_dingtalk(
         sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
         url += f"&timestamp={timestamp}&sign={sign}"
 
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
     return await _post(url, json={"msgtype": "text", "text": {"content": f"{title}\n{body}"}})
 
 
@@ -374,6 +462,7 @@ async def send_wecom(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """企业微信群机器人.
 
@@ -387,7 +476,9 @@ async def send_wecom(
             return False
         url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"
 
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
     return await _post(url, json={"msgtype": "text", "text": {"content": f"{title}\n{body}"}})
 
 
@@ -397,6 +488,7 @@ async def send_wecom_app(
     status: str,
     error_message: Optional[str] = None,
     duration_seconds: Optional[float] = None,
+    task_log: Optional[str] = None,
 ) -> bool:
     """企业微信自建应用 Pusher.
 
@@ -417,7 +509,9 @@ async def send_wecom_app(
         logger.error("WeCom app agent_id must be an integer")
         return False
 
-    title, body = _build_title_body(task_name, status, error_message, duration_seconds)
+    title, body = _build_title_body(
+        task_name, status, error_message, duration_seconds, task_log
+    )
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
             token_resp = await client.get(

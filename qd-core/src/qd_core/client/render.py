@@ -11,6 +11,8 @@ from typing import Any, Optional
 from jinja2.sandbox import SandboxedEnvironment
 
 from qd_core.client.har import HARParser
+from qd_core.config import QDCoreSettings
+from qd_core.filters.jinja_extensions import QDCompatibilityExtension, qd_while_guard
 from qd_core.filters.jinja_filters import jinja_globals, jinja_inner_globals
 from qd_core.schemas.har import HARTemplate
 from qd_core.utils.log import Log
@@ -22,11 +24,16 @@ class RenderError(Exception):
     """Raised when a template string fails to render."""
 
 
-def make_jinja_env() -> SandboxedEnvironment:
+def make_jinja_env(settings: QDCoreSettings | None = None) -> SandboxedEnvironment:
     """Create a sandboxed Jinja2 environment with QD-compatible filters/globals."""
-    env = SandboxedEnvironment()
+    settings = settings or QDCoreSettings()
+    env = SandboxedEnvironment(extensions=[QDCompatibilityExtension])
     env.globals.update(jinja_globals)
     env.globals.update(jinja_inner_globals)
+    env.globals["_qd_while_guard"] = qd_while_guard
+    env.globals["_qd_while_loop_limit"] = settings.while_loop_limit
+    env.globals["_qd_while_loop_timeout"] = settings.while_loop_timeout
+    env.globals["_qd_while_range"] = lambda: range(settings.while_loop_limit + 1)
     env.filters.update(jinja_globals)
     return env
 

@@ -35,6 +35,7 @@ htmlcov/
 # Environment
 .env
 .env.local
+!docker/.env
 
 # Database
 *.db
@@ -48,3 +49,4 @@ Thumbs.db
 qd-web/node_modules/
 qd-web/dist/
 qd-web/.vite/
+/temp

@@ -48,13 +48,16 @@ async function save() {
 
 <template>
   <n-spin :show="loading">
-    <div class="flex justify-between items-center mb-4">
-      <div class="flex items-center gap-2">
-        <n-button size="small" @click="router.push('/templates')">← 返回</n-button>
-        <span class="text-lg font-semibold">模板详情 #{{ route.params.id }}</span>
-      </div>
-      <n-button type="primary" :loading="saving" @click="save">保存</n-button>
-    </div>
-    <TemplateEditor v-if="templateData" ref="editorRef" :initial-data="templateData" />
+    <TemplateEditor v-if="templateData" ref="editorRef" :initial-data="templateData">
+      <template #toolbar-leading>
+        <div class="flex items-center gap-2">
+          <n-button size="small" @click="router.push('/templates')">← 返回</n-button>
+          <span class="hidden xl:inline text-sm font-semibold whitespace-nowrap">模板 #{{ route.params.id }}</span>
+        </div>
+      </template>
+      <template #toolbar-action>
+        <n-button type="primary" :loading="saving" @click="save">保存</n-button>
+      </template>
+    </TemplateEditor>
   </n-spin>
 </template>

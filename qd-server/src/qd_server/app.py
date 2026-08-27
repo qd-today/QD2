@@ -4,6 +4,7 @@ Creates and configures the FastAPI application with all routes,
 middleware, and database initialization.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -11,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from qd_server.api import api_router
-from qd_server.config import ensure_jwt_secret, get_settings
+from qd_server.config import ensure_encryption_key, ensure_jwt_secret, get_settings
 
 logger = logging.getLogger("qd2")
 
@@ -23,6 +24,13 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_config_dir()
     ensure_jwt_secret(settings)
+    ensure_encryption_key(settings)
+
+    from qd_server.api.data_management import apply_pending_database_restore
+
+    restored_backup = await asyncio.to_thread(apply_pending_database_restore, settings)
+    if restored_backup:
+        logger.warning("Applied pending database restore; previous database saved to %s", restored_backup)
 
     # Initialize database tables
     from sqlmodel import SQLModel
@@ -34,6 +42,12 @@ async def lifespan(app: FastAPI):
         applied_migrations = await conn.run_sync(upgrade_database_schema)
     if applied_migrations:
         logger.info("Applied database schema upgrades: %s", ", ".join(applied_migrations))
+
+    from qd_server.services.encryption import migrate_sensitive_storage
+
+    protected_values = await migrate_sensitive_storage(settings)
+    if protected_values:
+        logger.info("Encrypted or rotated %d sensitive database values", protected_values)
 
     # Start scheduler
     from qd_server.services.scheduler import scheduler

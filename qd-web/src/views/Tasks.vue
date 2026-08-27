@@ -28,20 +28,25 @@ const templates = ref<any[]>([])
 const groups = ref<any[]>([])
 const selectedGroupId = ref<number | null>(null)
 const selectedTaskIds = ref<number[]>([])
+const currentPage = ref(1)
+const pageSize = ref(20)
+const search = ref('')
 const collapsedTaskGroups = ref<Record<string, boolean>>({})
 const showGroupDialog = ref(false)
 const newGroupName = ref('')
 const showScheduleDialog = ref(false)
-const scheduleTaskId = ref<number | null>(null)
+const scheduleTaskIds = ref<number[]>([])
 const scheduleSaving = ref(false)
 const scheduleForm = reactive({
   schedule_type: 'interval',
   interval_seconds: 3600,
   cron_expression: '',
   run_time: '00:00',
+  start_date: '',
+  run_at: '',
 })
 const showTaskGroupDialog = ref(false)
-const groupTaskId = ref<number | null>(null)
+const groupTaskIds = ref<number[]>([])
 const taskGroupValue = ref<number | null>(null)
 const groupSaving = ref(false)
 
@@ -56,6 +61,8 @@ const form = reactive({
   interval_seconds: 3600,
   cron_expression: '',
   run_time: '00:00',
+  start_date: '',
+  run_at: '',
   variables: {} as Record<string, string>,
   // execution config
   retry_count: 0,
@@ -63,6 +70,8 @@ const form = reactive({
   random_delay_min: 0,
   random_delay_max: 0,
   proxy: '',
+  notify_on_success: true,
+  notify_on_failure: true,
 })
 
 const filteredTasks = computed(() => {
@@ -141,7 +150,10 @@ function formatScheduleRule(config?: Record<string, unknown>) {
     return `每 ${seconds} 秒`
   }
   if (scheduleType === 'cron') return `Cron: ${String(schedule.cron_expression || '-')}`
-  if (scheduleType === 'daily') return `每天 ${String(schedule.run_time || '00:00')}`
+  if (scheduleType === 'daily') {
+    const startDate = String(schedule.start_date || '')
+    return `每天 ${String(schedule.run_time || '00:00')}${startDate ? `（${startDate} 起）` : ''}`
+  }
   if (scheduleType === 'once') {
     const runAt = typeof schedule.run_at === 'string' ? schedule.run_at : null
     return runAt ? `单次 ${formatDateTime(runAt)}` : '仅手动'
@@ -149,8 +161,12 @@ function formatScheduleRule(config?: Record<string, unknown>) {
   return '仅手动'
 }
 
+function taskDisplayName(row: any) {
+  return row.description ? `${row.name} - ${row.description}` : row.name
+}
+
 onMounted(async () => {
-  await taskStore.fetchTasks()
+  await loadTasks()
   await fetchTemplates()
   await fetchGroups()
   const templateId = Number(route.query.template_id)
@@ -160,10 +176,51 @@ onMounted(async () => {
   }
 })
 
+async function loadTasks() {
+  await taskStore.fetchTasks(
+    currentPage.value,
+    pageSize.value,
+    '',
+    search.value.trim(),
+    selectedGroupId.value,
+  )
+  selectedTaskIds.value = []
+}
+
+async function handlePageChange(page: number) {
+  currentPage.value = page
+  await loadTasks()
+}
+
+async function handlePageSizeChange(size: number) {
+  pageSize.value = size
+  currentPage.value = 1
+  await loadTasks()
+}
+
+async function doSearch() {
+  currentPage.value = 1
+  await loadTasks()
+}
+
+async function selectGroup(groupId: number | null) {
+  selectedGroupId.value = selectedGroupId.value === groupId ? null : groupId
+  currentPage.value = 1
+  await loadTasks()
+}
+
 async function fetchTemplates() {
   try {
-    const res = await api.get('/api/templates?page_size=100')
-    templates.value = res.data.items
+    const allTemplates: any[] = []
+    let page = 1
+    let total = 0
+    do {
+      const res = await api.get('/api/templates', { params: { page, page_size: 100 } })
+      allTemplates.push(...res.data.items)
+      total = res.data.total
+      page++
+    } while (allTemplates.length < total)
+    templates.value = allTemplates
   } catch {
     message.error('模板列表加载失败')
   }
@@ -185,6 +242,7 @@ function statusType(status: string): any {
     running: 'warning',
     pending: 'info',
     paused: 'default',
+    disabled: 'warning',
   }
   return m[status] || 'default'
 }
@@ -202,14 +260,16 @@ function statusLabel(status?: string): string {
 }
 
 const jinjaGlobals = new Set([
-  '_cookies', 'True', 'False', 'none', 'int', 'float', 'bool', 'utf8', 'unicode',
+  '_cookies', '_proxy', '__log__', 'True', 'False', 'none', 'int', 'float', 'bool', 'utf8', 'unicode',
   'urlencode', 'quote_chinese', 'b2a_hex', 'a2b_hex', 'b2a_uu', 'a2b_uu',
   'b2a_base64', 'a2b_base64', 'b2a_qp', 'a2b_qp', 'crc_hqx', 'crc32', 'format',
   'b64decode', 'b64encode', 'to_uuid', 'md5', 'sha1', 'password_hash', 'hash',
   'aes_encrypt', 'aes_decrypt', 'rsa_encrypt', 'rsa_decrypt', 'timestamp',
   'date_time', 'strftime', 'is_num', 'add', 'sub', 'multiply', 'divide', 'Faker',
   'regex_replace', 'regex_escape', 'regex_search', 'regex_findall', 'ternary',
-  'random', 'shuffle', 'mandatory', 'type_debug', 'dict', 'lipsum', 'range',
+  'random', 'shuffle', 'mandatory', 'type_debug', 'dict', 'list', 'lipsum', 'range',
+  'ltrim', 'rtrim', 'loop_length', 'loop_index', 'loop_index0', 'loop_revindex',
+  'loop_revindex0', 'loop_first', 'loop_last', 'loop_depth', 'loop_depth0',
 ])
 
 function extractVars(templateId: number) {
@@ -305,12 +365,16 @@ function resetForm() {
   form.interval_seconds = 3600
   form.cron_expression = ''
   form.run_time = '00:00'
+  form.start_date = ''
+  form.run_at = ''
   form.variables = {}
   form.retry_count = 0
   form.retry_interval_seconds = 30
   form.random_delay_min = 0
   form.random_delay_max = 0
   form.proxy = ''
+  form.notify_on_success = true
+  form.notify_on_failure = true
   templateVariables.value = []
 }
 
@@ -339,6 +403,8 @@ function openEdit(row: any) {
   form.interval_seconds = row.schedule_config?.interval_seconds || 3600
   form.cron_expression = row.schedule_config?.cron_expression || ''
   form.run_time = row.schedule_config?.run_time || '00:00'
+  form.start_date = row.schedule_config?.start_date || ''
+  form.run_at = row.schedule_config?.run_at || ''
   form.variables = { ...(row.variables || {}) }
   const ec = row.execution_config || {}
   form.retry_count = ec.retry_count || 0
@@ -346,6 +412,8 @@ function openEdit(row: any) {
   form.random_delay_min = ec.random_delay_min || 0
   form.random_delay_max = ec.random_delay_max || 0
   form.proxy = ec.proxy || ''
+  form.notify_on_success = ec.notify_on_success !== false
+  form.notify_on_failure = ec.notify_on_failure !== false
   onTemplateChange(row.template_id)
   showDialog.value = true
 }
@@ -361,29 +429,55 @@ function openCookies(row: any) {
 }
 
 function openTemplate(row: any) {
-  router.push(`/templates/${row.template_id}`)
+  const href = router.resolve({ name: 'TemplateDetail', params: { id: row.template_id } }).href
+  window.open(href, '_blank', 'noopener,noreferrer')
 }
 
 function openSchedule(row: any) {
   const config = row.schedule_config || {}
-  scheduleTaskId.value = row.id
+  scheduleTaskIds.value = [row.id]
   scheduleForm.schedule_type = config.schedule_type || 'interval'
   scheduleForm.interval_seconds = config.interval_seconds || 3600
   scheduleForm.cron_expression = config.cron_expression || ''
   scheduleForm.run_time = config.run_time || '00:00'
+  scheduleForm.start_date = config.start_date || ''
+  scheduleForm.run_at = config.run_at || ''
+  showScheduleDialog.value = true
+}
+
+function openBatchSchedule() {
+  const firstTask = taskStore.tasks.find((task) => selectedTaskIds.value.includes(task.id))
+  if (!firstTask) return
+  const config = firstTask.schedule_config || {}
+  scheduleTaskIds.value = [...selectedTaskIds.value]
+  scheduleForm.schedule_type = String(config.schedule_type || 'interval')
+  scheduleForm.interval_seconds = Number(config.interval_seconds || 3600)
+  scheduleForm.cron_expression = String(config.cron_expression || '')
+  scheduleForm.run_time = String(config.run_time || '00:00')
+  scheduleForm.start_date = String(config.start_date || '')
+  scheduleForm.run_at = String(config.run_at || '')
   showScheduleDialog.value = true
 }
 
 async function saveSchedule() {
-  if (!scheduleTaskId.value) return
+  if (scheduleTaskIds.value.length === 0) return
   const scheduleConfig: Record<string, string | number> = { schedule_type: scheduleForm.schedule_type }
   if (scheduleForm.schedule_type === 'interval') scheduleConfig.interval_seconds = scheduleForm.interval_seconds
   if (scheduleForm.schedule_type === 'cron') scheduleConfig.cron_expression = scheduleForm.cron_expression
-  if (scheduleForm.schedule_type === 'daily') scheduleConfig.run_time = scheduleForm.run_time
+  if (scheduleForm.schedule_type === 'daily') {
+    scheduleConfig.run_time = scheduleForm.run_time
+    if (scheduleForm.start_date) scheduleConfig.start_date = scheduleForm.start_date
+  }
+  if (scheduleForm.schedule_type === 'once' && scheduleForm.run_at) scheduleConfig.run_at = scheduleForm.run_at
   scheduleSaving.value = true
   try {
-    await taskStore.updateTask(scheduleTaskId.value, { schedule_config: scheduleConfig })
+    await api.post('/api/tasks/batch', {
+      task_ids: scheduleTaskIds.value,
+      action: 'schedule',
+      schedule_config: scheduleConfig,
+    })
     showScheduleDialog.value = false
+    await loadTasks()
     message.success('定时设置已保存')
   } catch (err: any) {
     message.error(err.response?.data?.detail || '定时设置保存失败')
@@ -393,17 +487,28 @@ async function saveSchedule() {
 }
 
 function openTaskGroup(row: any) {
-  groupTaskId.value = row.id
+  groupTaskIds.value = [row.id]
   taskGroupValue.value = row.group_id || null
   showTaskGroupDialog.value = true
 }
 
+function openBatchGroup() {
+  groupTaskIds.value = [...selectedTaskIds.value]
+  taskGroupValue.value = null
+  showTaskGroupDialog.value = true
+}
+
 async function saveTaskGroup() {
-  if (!groupTaskId.value) return
+  if (groupTaskIds.value.length === 0) return
   groupSaving.value = true
   try {
-    await taskStore.updateTask(groupTaskId.value, { group_id: taskGroupValue.value })
+    await api.post('/api/tasks/batch', {
+      task_ids: groupTaskIds.value,
+      action: 'group',
+      group_id: taskGroupValue.value,
+    })
     showTaskGroupDialog.value = false
+    await loadTasks()
     await fetchGroups()
     message.success('任务分组已保存')
   } catch (err: any) {
@@ -426,13 +531,17 @@ async function save() {
   const scheduleConfig: any = { schedule_type: form.schedule_type }
   if (form.schedule_type === 'interval') scheduleConfig.interval_seconds = form.interval_seconds
   if (form.schedule_type === 'cron') scheduleConfig.cron_expression = form.cron_expression
-  if (form.schedule_type === 'daily') scheduleConfig.run_time = form.run_time
+  if (form.schedule_type === 'daily') {
+    scheduleConfig.run_time = form.run_time
+    if (form.start_date) scheduleConfig.start_date = form.start_date
+  }
+  if (form.schedule_type === 'once' && form.run_at) scheduleConfig.run_at = form.run_at
 
   const data: any = {
     name: form.name,
     description: form.description,
     template_id: form.template_id!,
-    group_id: form.group_id || undefined,
+    group_id: form.group_id,
     schedule_config: scheduleConfig,
     variables: form.variables,
     execution_config: {
@@ -441,6 +550,8 @@ async function save() {
       random_delay_min: form.random_delay_min,
       random_delay_max: form.random_delay_max,
       proxy: form.proxy || '',
+      notify_on_success: form.notify_on_success,
+      notify_on_failure: form.notify_on_failure,
     },
   }
 
@@ -452,6 +563,7 @@ async function save() {
       await taskStore.createTask(data)
     }
     showDialog.value = false
+    await loadTasks()
     message.success('保存成功')
   } catch (err: any) {
     message.error(err.response?.data?.detail || '保存失败')
@@ -467,7 +579,7 @@ async function runTask(id: number) {
     await nextTick()
     await taskStore.runTask(id)
     message.success('任务执行完成')
-    await taskStore.fetchTasks()
+    await loadTasks()
   } catch {
     message.error('执行失败')
   } finally {
@@ -483,7 +595,53 @@ function deleteTask(id: number) {
     negativeText: '取消',
     onPositiveClick: async () => {
       await taskStore.deleteTask(id)
+      if (taskStore.tasks.length === 0 && currentPage.value > 1) currentPage.value--
+      await loadTasks()
       message.success('已删除')
+    },
+  })
+}
+
+async function setTaskEnabled(row: any) {
+  const action = row.status === 'disabled' || row.status === 'paused' ? 'enable' : 'disable'
+  try {
+    await api.post('/api/tasks/batch', { task_ids: [row.id], action })
+    await loadTasks()
+    message.success(action === 'enable' ? '任务已启用' : '任务已禁用')
+  } catch (err: any) {
+    message.error(err.response?.data?.detail || '任务状态更新失败')
+  }
+}
+
+async function runBatchAction(action: 'enable' | 'disable') {
+  if (selectedTaskIds.value.length === 0) return
+  try {
+    await api.post('/api/tasks/batch', { task_ids: selectedTaskIds.value, action })
+    await loadTasks()
+    message.success(action === 'enable' ? '已批量启用' : '已批量禁用')
+  } catch (err: any) {
+    message.error(err.response?.data?.detail || '批量操作失败')
+  }
+}
+
+function deleteSelectedTasks() {
+  if (selectedTaskIds.value.length === 0) return
+  const ids = [...selectedTaskIds.value]
+  dialog.warning({
+    title: '批量删除任务',
+    content: `确定删除选中的 ${ids.length} 个任务？`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await api.post('/api/tasks/batch', { task_ids: ids, action: 'delete' })
+        if (ids.length >= taskStore.tasks.length && currentPage.value > 1) currentPage.value--
+        await loadTasks()
+        await fetchGroups()
+        message.success('已批量删除')
+      } catch (err: any) {
+        message.error(err.response?.data?.detail || '批量删除失败')
+      }
     },
   })
 }
@@ -511,6 +669,8 @@ function deleteGroup(id: number) {
     negativeText: '取消',
     onPositiveClick: async () => {
       await api.delete(`/api/task-groups/${id}`)
+      if (selectedGroupId.value === id) selectedGroupId.value = null
+      await loadTasks()
       await fetchGroups()
       message.success('已删除')
     },
@@ -520,9 +680,15 @@ function deleteGroup(id: number) {
 
 <template>
   <div>
-    <div class="flex justify-between items-center mb-4">
+    <div class="flex flex-wrap justify-between items-center gap-2 mb-4">
       <h2 class="text-lg font-semibold m-0">任务管理</h2>
-      <n-button type="primary" @click="openCreate()">新建任务</n-button>
+      <div class="flex flex-wrap items-center justify-end gap-2">
+        <n-input-group class="!w-72">
+          <n-input v-model:value="search" clearable placeholder="搜索任务名称或备注" @keyup.enter="doSearch" />
+          <n-button type="primary" ghost @click="doSearch">搜索</n-button>
+        </n-input-group>
+        <n-button type="primary" @click="openCreate()">新建任务</n-button>
+      </div>
     </div>
 
     <div v-if="groups.length > 0" class="mb-3 flex flex-wrap gap-2">
@@ -532,12 +698,24 @@ function deleteGroup(id: number) {
         :type="selectedGroupId === g.id ? 'primary' : 'default'"
         round
         class="cursor-pointer"
-        @click="selectedGroupId = selectedGroupId === g.id ? null : g.id"
+        @click="selectGroup(g.id)"
       >
         {{ g.name }} ({{ g.task_count }})
       </n-tag>
-      <n-tag v-if="selectedGroupId" closable round @close="selectedGroupId = null">清除筛选</n-tag>
+      <n-tag v-if="selectedGroupId" closable round @close="selectGroup(selectedGroupId)">清除筛选</n-tag>
       <n-button size="tiny" quaternary @click="showGroupDialog = true">管理分组</n-button>
+    </div>
+
+    <div
+      v-if="selectedTaskIds.length > 0"
+      class="mb-3 flex flex-wrap items-center gap-2 border-y border-gray-200 dark:border-gray-700 py-2"
+    >
+      <span class="text-sm text-gray-500">已选择 {{ selectedTaskIds.length }} 项</span>
+      <n-button size="small" type="success" ghost @click="runBatchAction('enable')">启用</n-button>
+      <n-button size="small" type="warning" ghost @click="runBatchAction('disable')">禁用</n-button>
+      <n-button size="small" @click="openBatchSchedule">定时</n-button>
+      <n-button size="small" @click="openBatchGroup">分组</n-button>
+      <n-button size="small" type="error" ghost @click="deleteSelectedTasks">删除</n-button>
     </div>
 
     <n-spin :show="taskStore.loading">
@@ -603,7 +781,9 @@ function deleteGroup(id: number) {
                 </td>
                 <td class="font-medium">
                   <n-tag v-if="row.status === 'disabled'" size="tiny" type="warning" class="mr-1">禁用</n-tag>
-                  <span :title="row.name">{{ row.name }}</span>
+                  <span class="inline-block max-w-80 truncate align-middle" :title="taskDisplayName(row)">
+                    {{ taskDisplayName(row) }}
+                  </span>
                 </td>
                 <td class="whitespace-nowrap">
                   <span class="text-green-600 dark:text-green-400">{{ row.success_count ?? 0 }}</span>
@@ -627,6 +807,14 @@ function deleteGroup(id: number) {
                   <n-button size="tiny" quaternary @click="openSchedule(row)">定时</n-button>
                   <n-button size="tiny" quaternary @click="openHistory(row)">日志</n-button>
                   <n-button size="tiny" quaternary @click="openTaskGroup(row)">分组</n-button>
+                  <n-button
+                    size="tiny"
+                    quaternary
+                    :type="row.status === 'disabled' || row.status === 'paused' ? 'success' : 'warning'"
+                    @click="setTaskEnabled(row)"
+                  >
+                    {{ row.status === 'disabled' || row.status === 'paused' ? '启用' : '禁用' }}
+                  </n-button>
                   <n-dropdown
                     trigger="click"
                     :options="[
@@ -643,6 +831,17 @@ function deleteGroup(id: number) {
             </template>
           </tbody>
         </n-table>
+      </div>
+      <div v-if="taskStore.total > pageSize" class="mt-4 flex justify-end">
+        <n-pagination
+          :page="currentPage"
+          :page-size="pageSize"
+          :item-count="taskStore.total"
+          :page-sizes="[20, 50, 100]"
+          show-size-picker
+          @update:page="handlePageChange"
+          @update:page-size="handlePageSizeChange"
+        />
       </div>
     </n-spin>
 
@@ -680,16 +879,23 @@ function deleteGroup(id: number) {
         </n-form-item>
 
         <n-divider title-placement="left" class="!my-2 !text-xs">模板变量</n-divider>
-        <div v-if="templateVariables.length > 0" class="space-y-3 mb-3">
-          <div v-for="v in templateVariables" :key="v.key" class="grid grid-cols-1 md:grid-cols-[minmax(12rem,2fr)_minmax(18rem,3fr)] gap-1 md:gap-3 items-center">
-            <label class="text-sm break-all" :title="v.key">{{ v.key }}</label>
+        <div v-if="templateVariables.length > 0" class="mb-3">
+          <n-form-item
+            v-for="v in templateVariables"
+            :key="v.key"
+            :show-feedback="false"
+            class="!mb-3"
+          >
+            <template #label>
+              <span class="block max-w-full truncate" :title="v.key">{{ v.key }}</span>
+            </template>
             <n-input
               v-model:value="form.variables[v.key]"
               :placeholder="v.value || '请输入值'"
               size="small"
               class="w-full"
             />
-          </div>
+          </n-form-item>
         </div>
         <div v-else class="text-xs text-gray-400 mb-2 pl-2">该模板无需变量</div>
 
@@ -701,7 +907,7 @@ function deleteGroup(id: number) {
               { label: '固定间隔', value: 'interval' },
               { label: 'Cron 表达式', value: 'cron' },
               { label: '每天执行', value: 'daily' },
-              { label: '仅手动', value: 'once' },
+              { label: '指定时间 / 仅手动', value: 'once' },
             ]"
           />
         </n-form-item>
@@ -713,6 +919,17 @@ function deleteGroup(id: number) {
         </n-form-item>
         <n-form-item v-if="form.schedule_type === 'daily'" label="执行时间">
           <n-time-picker v-model:formatted-value="form.run_time" format="HH:mm" value-format="HH:mm" />
+        </n-form-item>
+        <n-form-item v-if="form.schedule_type === 'daily'" label="起始日期">
+          <n-date-picker
+            v-model:formatted-value="form.start_date"
+            type="date"
+            value-format="yyyy-MM-dd"
+            clearable
+          />
+        </n-form-item>
+        <n-form-item v-if="form.schedule_type === 'once'" label="指定时间">
+          <n-input v-model:value="form.run_at" placeholder="YYYY-MM-DDTHH:mm:ss；留空为仅手动" />
         </n-form-item>
 
         <n-divider title-placement="left" class="!my-2 !text-xs">执行选项 (重试/延迟/代理)</n-divider>
@@ -731,6 +948,12 @@ function deleteGroup(id: number) {
         <n-form-item label="代理">
           <n-input v-model:value="form.proxy" placeholder="http://host:port 或 socks5://host:port (留空不用)" />
         </n-form-item>
+
+        <n-divider title-placement="left" class="!my-2 !text-xs">推送设置</n-divider>
+        <n-form-item label="任务推送">
+          <n-checkbox v-model:checked="form.notify_on_success">成功时推送</n-checkbox>
+          <n-checkbox v-model:checked="form.notify_on_failure" class="ml-4">失败时推送</n-checkbox>
+        </n-form-item>
       </n-form>
       <template #footer>
         <div class="flex justify-end gap-2">
@@ -744,7 +967,7 @@ function deleteGroup(id: number) {
     <n-modal
       v-model:show="showScheduleDialog"
       preset="card"
-      title="定时设置"
+      :title="scheduleTaskIds.length > 1 ? `批量定时 (${scheduleTaskIds.length})` : '定时设置'"
       class="max-w-md"
       :style="{ width: '92vw' }"
     >
@@ -756,7 +979,7 @@ function deleteGroup(id: number) {
               { label: '固定间隔', value: 'interval' },
               { label: 'Cron 表达式', value: 'cron' },
               { label: '每天执行', value: 'daily' },
-              { label: '仅手动', value: 'once' },
+              { label: '指定时间 / 仅手动', value: 'once' },
             ]"
           />
         </n-form-item>
@@ -774,6 +997,18 @@ function deleteGroup(id: number) {
             class="w-full"
           />
         </n-form-item>
+        <n-form-item v-if="scheduleForm.schedule_type === 'daily'" label="起始日期">
+          <n-date-picker
+            v-model:formatted-value="scheduleForm.start_date"
+            type="date"
+            value-format="yyyy-MM-dd"
+            clearable
+            class="w-full"
+          />
+        </n-form-item>
+        <n-form-item v-if="scheduleForm.schedule_type === 'once'" label="指定时间">
+          <n-input v-model:value="scheduleForm.run_at" placeholder="YYYY-MM-DDTHH:mm:ss；留空为仅手动" />
+        </n-form-item>
       </n-form>
       <template #footer>
         <div class="flex justify-end gap-2">
@@ -787,7 +1022,7 @@ function deleteGroup(id: number) {
     <n-modal
       v-model:show="showTaskGroupDialog"
       preset="card"
-      title="任务分组"
+      :title="groupTaskIds.length > 1 ? `批量分组 (${groupTaskIds.length})` : '任务分组'"
       class="max-w-md"
       :style="{ width: '92vw' }"
     >

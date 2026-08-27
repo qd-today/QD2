@@ -103,6 +103,129 @@ def test_request_api_supports_post_form_internal_scheme(client):
     assert '"转换后": "你好"' in response.json()["body"]
 
 
+def test_request_api_preserves_literal_chinese_in_form_body(client):
+    response = client.post(
+        "/api/test/test",
+        json={
+            "method": "POST",
+            "url": "api://util/unicode",
+            "body_type": "form",
+            "body": "html_unescape=false&content=你好",
+            "rule": {
+                "extract_variables": [
+                    {"name": "__log__", "re": '"转换后": "(.*)"', "from": "content"},
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 200
+    assert '"转换后": "你好"' in response.json()["body"]
+    assert response.json()["extracted_variables"] == {"__log__": "你好"}
+
+
+def test_request_api_renders_qd_urlencode_filter(client):
+    response = client.post(
+        "/api/test/test",
+        json={
+            "method": "POST",
+            "url": "api://util/urldecode",
+            "body_type": "form",
+            "body": "unquote_plus=false&encoding=utf-8&content={{username|urlencode}}",
+            "variables": {"username": "测试 用户"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 200
+    assert '"转换后": "测试 用户"' in response.json()["body"]
+
+
+def test_request_api_ignores_http2_authority_header(client):
+    response = client.post(
+        "/api/test/test",
+        json={
+            "method": "GET",
+            "url": "api://util/delay/0",
+            "headers": {"authority": "wrong.example"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 200
+
+
+def test_request_api_ignores_all_http2_pseudo_headers(client):
+    response = client.post(
+        "/api/test/test",
+        json={
+            "method": "GET",
+            "url": "api://util/delay/0",
+            "header_list": [
+                {"name": ":method", "value": "GET"},
+                {"name": ":path", "value": "/util/delay/0"},
+                {"name": ":scheme", "value": "https"},
+                {"name": ":authority", "value": "wrong.example"},
+                {"name": "X-Enabled", "value": "yes"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status_code"] == 200
+
+
+def test_request_api_exposes_proxy_runtime_variable(client):
+    response = client.post(
+        "/api/test/test",
+        json={
+            "method": "POST",
+            "url": "api://util/urldecode",
+            "body_type": "form",
+            "body": "unquote_plus=false&encoding=utf-8&content={{_proxy|urlencode}}",
+            "proxy": "http://proxy.example:8080",
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"转换后": "http://proxy.example:8080"' in response.json()["body"]
+
+
+def test_request_api_reuses_extracted_variables_in_test_session(client):
+    first = client.post(
+        "/api/test/test",
+        json={
+            "method": "POST",
+            "url": "api://util/unicode",
+            "body_type": "form",
+            "body": r"html_unescape=false&content=%5Cu4f60%5Cu597d",
+            "session_id": "compat-flow",
+            "rule": {
+                "extract_variables": [
+                    {"name": "result", "re": '"转换后": "(.+?)"', "from": "content"},
+                ],
+            },
+        },
+    )
+    second = client.post(
+        "/api/test/test",
+        json={
+            "method": "POST",
+            "url": "api://util/urldecode",
+            "body_type": "form",
+            "body": "unquote_plus=false&encoding=utf-8&content={{result|urlencode}}",
+            "session_id": "compat-flow",
+        },
+    )
+
+    assert first.json()["extracted_variables"] == {"result": "你好"}
+    assert '"转换后": "你好"' in second.json()["body"]
+
+    cleared = client.delete("/api/test/sessions/compat-flow")
+    assert cleared.status_code == 204
+
+
 def test_request_api_reports_unsupported_internal_service(client):
     response = client.post(
         "/api/test/test",

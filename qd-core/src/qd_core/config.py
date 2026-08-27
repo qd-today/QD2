@@ -37,6 +37,26 @@ class QDCoreSettings(QDBaseSettings):
     # HTTP client defaults
     request_timeout: int = Field(default=30, description="Default HTTP request timeout in seconds")
     max_retries: int = Field(default=3, description="Default max retries for HTTP requests")
+    task_request_limit: int = Field(
+        default=1500,
+        ge=1,
+        description="Maximum HTTP requests executed by one task run",
+    )
+    while_loop_limit: int = Field(
+        default=10_000,
+        ge=1,
+        description="Maximum iterations for one QD-compatible while loop",
+    )
+    while_loop_timeout: float = Field(
+        default=900,
+        gt=0,
+        description="Maximum runtime in seconds for one QD-compatible while loop",
+    )
+    download_size_limit: int = Field(
+        default=50_000,
+        ge=1,
+        description="Maximum response characters retained per request",
+    )
 
     def ensure_config_dir(self) -> None:
         """Create config directory if it doesn't exist."""

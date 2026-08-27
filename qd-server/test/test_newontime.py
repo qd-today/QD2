@@ -59,3 +59,52 @@ def test_newontime_rejects_invalid_time():
 
     with pytest.raises(ValueError, match="invalid newontime"):
         convert_newontime({"sw": True, "time": "25:90"})
+
+
+def test_newontime_cron_mode():
+    schedule, patch = convert_newontime(
+        {
+            "sw": True,
+            "mode": "cron",
+            "cron_val": "*/15 * * * *",
+            "randsw": True,
+            "tz1": "5",
+            "tz2": "30",
+        }
+    )
+    assert schedule == {
+        "schedule_type": "cron",
+        "cron_expression": "*/15 * * * *",
+    }
+    assert patch == {"random_delay_min": 5, "random_delay_max": 30}
+
+
+def test_newontime_ontime_mode_is_daily_from_start_date():
+    schedule, patch = convert_newontime(
+        {
+            "sw": True,
+            "mode": "ontime",
+            "date": "2026-08-25",
+            "time": "00:10:10",
+            "randsw": False,
+        }
+    )
+    assert schedule == {
+        "schedule_type": "daily",
+        "run_time": "00:10:10",
+        "start_date": "2026-08-25",
+    }
+    assert patch == {}
+
+
+def test_legacy_ontime_schedule():
+    schedule, patch = convert_newontime(
+        {"sw": False},
+        old_ontimeflg=True,
+        old_ontime="06:22:00",
+    )
+    assert schedule == {
+        "schedule_type": "daily",
+        "run_time": "06:22:00",
+    }
+    assert patch == {}

@@ -5,6 +5,7 @@ Jinja2 rendering, success/failed asserts, and variable extraction.
 """
 
 import re
+import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -28,6 +29,32 @@ SUPPORTED_UTIL_PATHS = {
     "/string/replace",
     "/rsa",
 }
+SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
+
+
+def encode_form_non_ascii(value: str, mime_type: str) -> str:
+    """Percent-encode literal non-ASCII form characters without touching existing escapes."""
+    charset_match = re.search(r"charset\s*=\s*['\"]?([^;'\"\s]+)", mime_type, re.I)
+    encoding = charset_match.group(1) if charset_match else "utf-8"
+    encoded: list[str] = []
+    for character in value:
+        if ord(character) < 128:
+            encoded.append(character)
+            continue
+        encoded.extend(f"%{byte:02X}" for byte in character.encode(encoding))
+    return "".join(encoded)
+
+
+def normalize_proxy_url(proxy: str | None) -> str | None:
+    """Validate and normalize a task or editor-test proxy URL."""
+    if proxy is None or not proxy.strip():
+        return None
+    value = proxy.strip()
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in SUPPORTED_PROXY_SCHEMES or not parsed.hostname:
+        supported = ", ".join(sorted(SUPPORTED_PROXY_SCHEMES))
+        raise ValueError(f"Invalid proxy URL; expected one of: {supported}")
+    return value
 
 
 def resolve_api_url(url: str, api_base_url: str | None) -> str:
@@ -67,13 +94,46 @@ class QDFetcher:
         cookie_session: CookieSession | None = None,
         api_base_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        verify_tls: bool = True,
+        request_limit: int | None = None,
     ):
         self.settings = settings or QDCoreSettings()
         self.variables: dict[str, Any] = {}
-        self.session = cookie_session or CookieSession()
-        self.proxy = proxy
+        self.session = cookie_session if cookie_session is not None else CookieSession()
+        self.proxy = normalize_proxy_url(proxy)
         self.api_base_url = api_base_url
         self.transport = transport
+        self.verify_tls = verify_tls
+        self.request_limit = request_limit or self.settings.task_request_limit
+        self.request_count = 0
+
+    def _client_kwargs(self) -> dict[str, Any]:
+        client_kwargs: dict[str, Any] = {
+            "timeout": self.settings.request_timeout,
+            "follow_redirects": True,
+            "cookies": self.session.to_httpx_cookies(),
+            "verify": self.verify_tls,
+        }
+        if self.transport:
+            client_kwargs["transport"] = self.transport
+        elif self.proxy:
+            client_kwargs["proxy"] = self.proxy
+        return client_kwargs
+
+    def _inject_runtime_variables(self) -> None:
+        self.variables["_proxy"] = self.proxy or ""
+
+    async def execute_request(
+        self,
+        request: HARRequest,
+        global_extractors: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute one request through the scheduled-template request path."""
+        self._inject_runtime_variables()
+        async with httpx.AsyncClient(**self._client_kwargs()) as client:
+            result = await self._execute_request(client, request, global_extractors or {})
+            self.session.update_from_httpx(client.cookies)
+            return result
 
     async def execute_template(self, template: HARTemplate) -> list[dict[str, Any]]:
         """Execute all requests in a template sequentially.
@@ -88,19 +148,10 @@ class QDFetcher:
         merged = dict(template.variables)
         merged.update(self.variables)
         self.variables = merged
+        self._inject_runtime_variables()
         results = []
 
-        client_kwargs: dict[str, Any] = dict(
-            timeout=self.settings.request_timeout,
-            follow_redirects=True,
-            cookies=self.session.to_httpx_cookies(),
-        )
-        if self.proxy:
-            client_kwargs["proxy"] = self.proxy
-        if self.transport:
-            client_kwargs["transport"] = self.transport
-
-        async with httpx.AsyncClient(**client_kwargs) as client:
+        async with httpx.AsyncClient(**self._client_kwargs()) as client:
             for i, request in enumerate(template.requests):
                 if not request.checked:
                     logger.info("Skipping unchecked request %d/%d", i + 1, len(template.requests))
@@ -111,6 +162,7 @@ class QDFetcher:
 
                 try:
                     result = await self._execute_request(client, request, template.extractors)
+                    result.setdefault("request_index", i)
                     results.append(result)
 
                     # Persist response cookies into the session
@@ -128,6 +180,8 @@ class QDFetcher:
                             "success": False,
                             "error": str(e),
                             "request_index": i,
+                            "method": request.method.value,
+                            "url": request.url,
                         }
                     )
                     break  # Stop on first error
@@ -145,6 +199,9 @@ class QDFetcher:
         Renders url/headers/body with Jinja2, executes, then runs the QD v1
         rule engine (asserts + extract_variables) followed by legacy extractors.
         """
+        if self.request_count >= self.request_limit:
+            raise RuntimeError(f"task request limit exceeded ({self.request_limit})")
+        self.request_count += 1
         cookies_view = self.session
 
         # Render request pieces with Jinja2 (QD v1 compatible)
@@ -153,16 +210,14 @@ class QDFetcher:
             self.api_base_url,
         )
 
-        headers = {}
+        headers: list[tuple[str, str]] = []
         for h in request.headers:
+            if not h.checked:
+                continue
             name = render_string(h.name, self.variables, cookies_view)
-            headers[name] = render_string(h.value, self.variables, cookies_view)
-
-        params = {}
-        for q in request.queryString:
-            params[render_string(q.name, self.variables, cookies_view)] = render_string(
-                q.value, self.variables, cookies_view
-            )
+            if name.startswith(":") or name.lower() == "authority":
+                continue
+            headers.append((name, render_string(h.value, self.variables, cookies_view)))
 
         req_cookies = {}
         for c in request.cookies:
@@ -173,20 +228,21 @@ class QDFetcher:
         content = None
         if request.postData and request.postData.text:
             content = render_string(request.postData.text, self.variables, cookies_view)
-            if request.postData.mimeType and not any(
-                name.lower() == "content-type" for name in headers
-            ):
-                headers["Content-Type"] = request.postData.mimeType
+            if "application/x-www-form-urlencoded" in (request.postData.mimeType or "").lower():
+                content = encode_form_non_ascii(content, request.postData.mimeType)
+            if request.postData.mimeType and not any(name.lower() == "content-type" for name, _ in headers):
+                headers.append(("Content-Type", request.postData.mimeType))
 
         # Execute request
+        started_at = time.perf_counter()
         response = await client.request(
             method=request.method.value,
             url=url,
             headers=headers,
-            params=params or None,
             cookies=req_cookies or None,
             content=content,
         )
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
 
         # QD v1 rule engine: success/failed asserts + extract_variables
         rule_extracted: dict[str, Any] = {}
@@ -215,16 +271,22 @@ class QDFetcher:
         self.variables.update(legacy_extracted)
         extracted = {**legacy_extracted, **rule_extracted}
 
+        response_text = response.text
+        truncated = len(response_text) > self.settings.download_size_limit
+        if truncated:
+            response_text = response_text[: self.settings.download_size_limit] + "\n... (truncated)"
+
         return {
             "status": "success" if success else "failed",
             "success": success,
             "message": message,
             "status_code": response.status_code,
+            "method": request.method.value,
             "url": str(response.url),
             "headers": dict(response.headers),
-            "content": response.text[: self.settings.download_size_limit]
-            if hasattr(self.settings, "download_size_limit")
-            else response.text,
+            "content": response_text,
+            "elapsed_ms": elapsed_ms,
+            "truncated": truncated,
             "extracted_variables": extracted,
         }
 

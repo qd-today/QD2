@@ -36,6 +36,17 @@ class TestSuccessAsserts:
         assert not ok
         assert "success_asserts" in msg
 
+    def test_failed_status_message_matches_qd_v1_format(self):
+        rule = RequestRule(success_asserts=[AssertRule(re="200", from_="status")])
+
+        ok, msg = run_rule(make_response("Forbidden", status_code=403), rule, {})
+
+        assert not ok
+        assert msg == (
+            'Fail assert: {"re": "200", "from": "status"} from success_asserts,'
+            "Response Error : HTTP 403: Forbidden"
+        )
+
     def test_success_assert_on_status(self):
         rule = RequestRule(success_asserts=[AssertRule(re="200", from_="status")])
         ok, _ = run_rule(make_response("x", status_code=200), rule, {})

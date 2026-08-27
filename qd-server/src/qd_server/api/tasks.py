@@ -1,11 +1,12 @@
 """Task management API routes."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import delete as sql_delete
+from sqlalchemy import or_
 from sqlmodel import col, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -14,6 +15,7 @@ from qd_server.models.task import Task, TaskRun
 from qd_server.models.task_group import TaskGroup
 from qd_server.models.template import Template
 from qd_server.models.user import User
+from qd_server.services.encryption import protect_dict, protect_list, unprotect_dict, unprotect_list
 
 router = APIRouter()
 
@@ -84,6 +86,19 @@ class TaskListResponse(BaseModel):
     total: int
 
 
+class TaskBulkRequest(BaseModel):
+    task_ids: list[int]
+    action: Literal["enable", "disable", "schedule", "group", "delete"]
+    schedule_config: Optional[dict] = None
+    group_id: Optional[int] = None
+
+
+class TaskBulkResponse(BaseModel):
+    action: str
+    affected: int
+    task_ids: list[int]
+
+
 async def _get_task_run_stats(
     task_ids: list[int], user_id: int, session: AsyncSession
 ) -> dict[int, dict[str, int | datetime | None]]:
@@ -139,14 +154,26 @@ async def list_tasks(
     status_filter: Optional[str] = Query(None, alias="status"),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    search: Optional[str] = None,
+    group_id: Optional[int] = None,
 ):
     """List current user's tasks."""
-    query = select(Task).where(Task.user_id == current_user.id)
+    filters = [Task.user_id == current_user.id]
 
     if status_filter:
-        query = query.where(Task.status == status_filter)
+        filters.append(Task.status == status_filter)
+    if search and search.strip():
+        term = search.strip()
+        filters.append(
+            or_(
+                col(Task.name).contains(term),
+                col(Task.description).contains(term),
+            )
+        )
+    if group_id is not None:
+        filters.append(Task.group_id == group_id)
 
-    query = query.order_by(col(Task.updated_at).desc())
+    query = select(Task).where(*filters).order_by(col(Task.updated_at).desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await session.execute(query)
@@ -154,11 +181,8 @@ async def list_tasks(
     run_stats = await _get_task_run_stats([task.id for task in tasks], current_user.id, session)
 
     # Get total
-    count_query = select(Task).where(Task.user_id == current_user.id)
-    if status_filter:
-        count_query = count_query.where(Task.status == status_filter)
-    total_result = await session.execute(count_query)
-    total = len(total_result.scalars().all())
+    count_query = select(func.count()).select_from(Task).where(*filters)
+    total = (await session.execute(count_query)).scalar_one()
 
     return TaskListResponse(
         items=[
@@ -169,7 +193,7 @@ async def list_tasks(
                 description=t.description,
                 schedule_config=t.schedule_config,
                 status=t.status,
-                variables=t.variables,
+                variables=unprotect_dict(t.variables, "task.variables"),
                 execution_config=t.execution_config or {},
                 group_id=t.group_id,
                 next_run_at=_get_effective_next_run_at(t),
@@ -185,6 +209,85 @@ async def list_tasks(
             for t in tasks
         ],
         total=total,
+    )
+
+
+@router.post("/batch", response_model=TaskBulkResponse)
+async def batch_tasks(
+    request: TaskBulkRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Apply one operation to multiple owned tasks."""
+    task_ids = list(dict.fromkeys(request.task_ids))
+    if not task_ids:
+        raise HTTPException(status_code=422, detail="Select at least one task")
+    if len(task_ids) > 1000:
+        raise HTTPException(status_code=422, detail="At most 1000 tasks can be updated at once")
+
+    result = await session.execute(
+        select(Task).where(
+            Task.id.in_(task_ids),
+            Task.user_id == current_user.id,
+        )
+    )
+    tasks = result.scalars().all()
+    if len(tasks) != len(task_ids):
+        raise HTTPException(status_code=404, detail="One or more tasks were not found")
+
+    if request.action == "schedule":
+        if request.schedule_config is None:
+            raise HTTPException(status_code=422, detail="schedule_config is required")
+        for task in tasks:
+            _validate_task_config(request.schedule_config, task.execution_config or {})
+    elif request.action == "group":
+        await _validate_group(request.group_id, current_user, session)
+
+    from qd_server.services.scheduler import scheduler
+
+    if request.action == "delete":
+        from qd_server.models.notification import Notification
+
+        await session.execute(
+            sql_delete(TaskRun).where(
+                TaskRun.task_id.in_(task_ids),
+                TaskRun.user_id == current_user.id,
+            )
+        )
+        await session.execute(
+            sql_delete(Notification).where(
+                Notification.task_id.in_(task_ids),
+                Notification.user_id == current_user.id,
+            )
+        )
+        for task in tasks:
+            await session.delete(task)
+    else:
+        now = datetime.utcnow()
+        for task in tasks:
+            if request.action == "enable":
+                task.status = "pending"
+            elif request.action == "disable":
+                task.status = "disabled"
+            elif request.action == "schedule":
+                task.schedule_config = request.schedule_config or {}
+            elif request.action == "group":
+                task.group_id = request.group_id
+            task.updated_at = now
+            session.add(task)
+
+    await session.commit()
+
+    for task in tasks:
+        if request.action in ("delete", "disable") or task.status in ("paused", "disabled"):
+            scheduler.remove_task(task.id)
+        elif request.action in ("enable", "schedule"):
+            scheduler.add_task(task)
+
+    return TaskBulkResponse(
+        action=request.action,
+        affected=len(tasks),
+        task_ids=task_ids,
     )
 
 
@@ -224,7 +327,7 @@ async def create_task(
         name=request.name,
         description=request.description,
         schedule_config=request.schedule_config,
-        variables=request.variables,
+        variables=protect_dict(request.variables, "task.variables"),
         execution_config=request.execution_config,
         group_id=request.group_id,
         created_at=now,
@@ -245,7 +348,7 @@ async def create_task(
         description=task.description,
         schedule_config=task.schedule_config,
         status=task.status,
-        variables=task.variables,
+        variables=unprotect_dict(task.variables, "task.variables"),
         execution_config=task.execution_config or {},
         group_id=task.group_id,
         next_run_at=_get_effective_next_run_at(task),
@@ -281,7 +384,7 @@ async def get_task(
         description=task.description,
         schedule_config=task.schedule_config,
         status=task.status,
-        variables=task.variables,
+        variables=unprotect_dict(task.variables, "task.variables"),
         execution_config=task.execution_config or {},
         group_id=task.group_id,
         next_run_at=_get_effective_next_run_at(task),
@@ -321,6 +424,8 @@ async def update_task(
         await _validate_group(update_data["group_id"], current_user, session)
     if "status" in update_data and update_data["status"] not in ("pending", "paused", "disabled"):
         raise HTTPException(status_code=422, detail="Invalid task status")
+    if "variables" in update_data:
+        update_data["variables"] = protect_dict(update_data["variables"], "task.variables")
     for key, value in update_data.items():
         setattr(task, key, value)
 
@@ -345,7 +450,7 @@ async def update_task(
         description=task.description,
         schedule_config=task.schedule_config,
         status=task.status,
-        variables=task.variables,
+        variables=unprotect_dict(task.variables, "task.variables"),
         execution_config=task.execution_config or {},
         group_id=task.group_id,
         next_run_at=_get_effective_next_run_at(task),
@@ -617,6 +722,12 @@ def _validate_task_config(schedule_config: dict, execution_config: dict) -> None
             for time_format in ("%H:%M:%S", "%H:%M")
         ):
             raise HTTPException(status_code=422, detail="run_time must be HH:MM or HH:MM:SS")
+        start_date = schedule_config.get("start_date")
+        if start_date:
+            try:
+                datetime.fromisoformat(str(start_date))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Invalid start_date") from exc
     elif schedule_type == "once":
         run_at = schedule_config.get("run_at")
         if run_at:
@@ -662,7 +773,7 @@ async def get_task_cookies(
 ):
     """View the task's persistent cookie session."""
     task = await _get_owned_task(task_id, current_user, session)
-    cookies = task.cookie_session or []
+    cookies = unprotect_list(task.cookie_session, "task.cookie_session")
     return CookieSessionResponse(task_id=task_id, cookies=cookies, count=len(cookies))
 
 
@@ -680,14 +791,15 @@ async def set_task_cookies(
 
     # Normalize through CookieSession to validate + canonical format
     cs = CoreCookieSession().from_json([c.model_dump() for c in cookies])
-    task.cookie_session = cs.to_json()
+    normalized_cookies = cs.to_json()
+    task.cookie_session = protect_list(normalized_cookies, "task.cookie_session")
     task.updated_at = datetime.utcnow()
     session.add(task)
     await session.commit()
     await session.refresh(task)
 
     return CookieSessionResponse(
-        task_id=task_id, cookies=task.cookie_session, count=len(task.cookie_session)
+        task_id=task_id, cookies=normalized_cookies, count=len(normalized_cookies)
     )
 
 

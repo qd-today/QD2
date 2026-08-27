@@ -11,7 +11,16 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 import qd_server.models  # noqa: F401 - register all tables
 from qd_server.api.notifications import NotificationCreate, create_notification
 from qd_server.api.admin import AdminUserUpdate, update_user
-from qd_server.api.tasks import TaskCreate, TaskUpdate, create_task, delete_task, run_task, update_task
+from qd_server.api.tasks import (
+    TaskBulkRequest,
+    TaskCreate,
+    TaskUpdate,
+    batch_tasks,
+    create_task,
+    delete_task,
+    run_task,
+    update_task,
+)
 from qd_server.api.templates import TemplateUpdate, delete_template, update_template
 from qd_server.models.notification import Notification
 from qd_server.models.task import Task, TaskRun
@@ -148,6 +157,84 @@ async def test_invalid_schedule_is_rejected(session):
             session,
         )
     assert error.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_batch_task_operations_are_owner_scoped(session, monkeypatch):
+    owner, other, owned_template, other_template, owned_group, _ = await _seed(session)
+    first = Task(user_id=owner.id, template_id=owned_template.id, name="first")
+    second = Task(user_id=owner.id, template_id=owned_template.id, name="second")
+    foreign = Task(user_id=other.id, template_id=other_template.id, name="foreign")
+    session.add_all([first, second, foreign])
+    await session.commit()
+
+    from qd_server.services.scheduler import scheduler
+
+    add_task = Mock()
+    remove_task = Mock()
+    monkeypatch.setattr(scheduler, "add_task", add_task)
+    monkeypatch.setattr(scheduler, "remove_task", remove_task)
+
+    disabled = await batch_tasks(
+        TaskBulkRequest(task_ids=[first.id, second.id], action="disable"),
+        owner,
+        session,
+    )
+    assert disabled.affected == 2
+    assert first.status == second.status == "disabled"
+    assert remove_task.call_count == 2
+
+    await batch_tasks(
+        TaskBulkRequest(
+            task_ids=[first.id, second.id],
+            action="group",
+            group_id=owned_group.id,
+        ),
+        owner,
+        session,
+    )
+    assert first.group_id == second.group_id == owned_group.id
+
+    await batch_tasks(
+        TaskBulkRequest(
+            task_ids=[first.id, second.id],
+            action="schedule",
+            schedule_config={"schedule_type": "daily", "run_time": "06:30:15"},
+        ),
+        owner,
+        session,
+    )
+    assert first.schedule_config == second.schedule_config == {
+        "schedule_type": "daily",
+        "run_time": "06:30:15",
+    }
+    assert add_task.call_count == 0
+
+    await batch_tasks(
+        TaskBulkRequest(task_ids=[first.id, second.id], action="enable"),
+        owner,
+        session,
+    )
+    assert first.status == second.status == "pending"
+    assert add_task.call_count == 2
+
+    with pytest.raises(HTTPException) as foreign_error:
+        await batch_tasks(
+            TaskBulkRequest(task_ids=[first.id, foreign.id], action="disable"),
+            owner,
+            session,
+        )
+    assert foreign_error.value.status_code == 404
+
+    deleted = await batch_tasks(
+        TaskBulkRequest(task_ids=[second.id], action="delete"),
+        owner,
+        session,
+    )
+    assert deleted.affected == 1
+    assert (
+        await session.execute(select(Task).where(Task.id == second.id))
+    ).scalar_one_or_none() is None
 
 
 @pytest.mark.asyncio

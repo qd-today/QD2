@@ -17,7 +17,12 @@ function formatTime(iso?: string) {
 }
 
 function runLog(row: any): string {
-  return row.response_summary || row.error_message || '-'
+  const summary = row.response_summary?.trim() || ''
+  const error = row.error_message?.trim() || ''
+  if (row.status !== 'success' && error && !summary.includes(error)) {
+    return [`失败原因: ${error}`, summary].filter(Boolean).join('\n\n')
+  }
+  return summary || error || '-'
 }
 
 async function fetchRuns() {
